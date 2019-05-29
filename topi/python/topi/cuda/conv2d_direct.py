@@ -115,3 +115,7 @@ def schedule_direct_cuda(cfg, s, conv):
     N, CO, OH, OW = get_const_tuple(output.shape)
     _, KH, KW, CI = get_const_tuple(kernel.shape)
     cfg.add_flop(2 * N * OH * OW * CO * CI * KH * KW)
+
+
+def schedule_direct_conv2d_NCHWc_cuda(s, cfg, data, conv_out, last):
+    pass
