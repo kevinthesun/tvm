@@ -18,6 +18,8 @@
 """Compute definition for conv2d with cuda backend"""
 import tvm
 from tvm import autotvm
+from tvm.autotvm.task.topi_integration import deserialize_args
+from tvm.autotvm.task import get_config
 from tvm.contrib import cudnn
 
 from ..nn.conv2d import conv2d_NCHWc, conv2d_alter_layout
@@ -153,6 +155,84 @@ def schedule_conv2d_nchw_cuda(cfg, outs):
 
     traverse_inline(s, outs[0].op, _callback)
     return s
+
+
+def _create_tuning_space(cfg, data, kernel, strides, padding, dilation, layout):
+    """Create schedule configuration from input arguments"""
+    dshape = get_const_tuple(data.shape)
+    kshape = get_const_tuple(kernel.shape)
+    pat = re.compile(r'NCHW.+(\d+)c')
+    if layout == 'NCHW':
+        n, ic, h, w = dshape
+        oc, _, kh, kw = kshape
+    elif layout == 'NHWC':
+        n, h, w, ic = dshape
+        kh, kw, oc, _ = kshape
+    elif pat.match(layout) is not None:
+        n, ic_chunk, h, w, ic_bn = dshape
+        oc_chunk, k_ic_chunk, kh, kw, k_ic_bn, oc_bn = kshape
+        assert ic_chunk == k_ic_chunk
+        assert ic_bn == k_ic_bn
+        ic = ic_chunk*ic_bn
+        oc = oc_chunk*oc_bn
+    else:
+        raise ValueError("Not support this layout {} with "
+                         "schedule template.".format(layout))
+    ph, pw = padding if isinstance(padding, (tuple, list)) else (padding, padding)
+    sh, sw = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    oh = (h - kh + 2 * ph) // sh + 1
+    ow = (w - kw + 2 * pw) // sw + 1
+
+    # Create schedule config for input and output channel splitting
+    cfg.define_split("tile_ic", ic, num_outputs=2)
+    cfg.define_split("tile_oc", oc, num_outputs=2)
+    cfg.define_split("tile_n", n, num_outputs=4)
+    cfg.define_split("tile_f", oc // cfg["tile_oc"].size(-1), num_outputs=4)
+    cfg.define_split("tile_y", h, num_outputs=4)
+    cfg.define_split("tile_x", w, num_outputs=4)
+    cfg.define_knob("fuse_yx", [0, 1])
+    cfg.define_knob('AA_double_buffer', [0, 1])
+    cfg.define_knob('WW_double_buffer', [0, 1])
+    cfg.define_knob("auto_unroll_max_step", [0, 512, 1500])
+
+
+# Define template function for autotvm task
+# We define schedule template in this function instead of
+# declaration function since actual input arguments need
+# to be altered by the schedule selected.
+@autotvm.task.register("topi_cuda_conv2d_NCHWc")
+def _topi_nn_conv2d_NCHWc(*args, **kwargs):
+    assert not kwargs, "Do not support kwargs in template function call"
+    args = deserialize_args(args)
+
+    if len(args) == 7:
+        data, kernel, strides, padding, dilation, origin_layout, dtype = args
+    else:
+        assert len(args) == 8
+        data, kernel, strides, padding, dilation, origin_layout, out_layout, dtype = args
+
+    raw_data_shape = get_const_tuple(data.shape)
+    raw_kernel_shape = get_const_tuple(kernel.shape)
+
+    # get config here
+    cfg = get_config()
+    _create_tuning_space(cfg, data, kernel, strides, padding, dilation, origin_layout)
+
+    # change shape with the value in config
+    ic_bn, oc_bn = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
+    new_data_shape = (raw_data_shape[0], raw_data_shape[1] // ic_bn,
+                      raw_data_shape[2], raw_data_shape[3], ic_bn)
+    data_layout = "NCHW%dc" % ic_bn
+    out_layout = "NCHW%dc" % oc_bn
+    new_kernel_shape = (raw_kernel_shape[0] // oc_bn, raw_kernel_shape[1] // ic_bn,
+                        raw_kernel_shape[2], raw_kernel_shape[3], ic_bn, oc_bn)
+    new_data = tvm.placeholder(new_data_shape, data.dtype)
+    new_kernel = tvm.placeholder(new_kernel_shape, kernel.dtype)
+
+    C = conv2d_NCHWc_cuda(cfg, new_data, new_kernel, strides, padding, dilation,
+                          data_layout, out_layout, dtype)
+    s = schedule_conv2d_NCHWc_cuda(cfg, [C])
+    return s, [new_data, new_kernel, C]
 
 
 @conv2d_alter_layout.register("cuda")
