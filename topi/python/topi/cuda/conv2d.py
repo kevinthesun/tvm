@@ -178,10 +178,6 @@ def _create_tuning_space(cfg, data, kernel, strides, padding, dilation, layout):
     else:
         raise ValueError("Not support this layout {} with "
                          "schedule template.".format(layout))
-    ph, pw = padding if isinstance(padding, (tuple, list)) else (padding, padding)
-    sh, sw = strides if isinstance(strides, (tuple, list)) else (strides, strides)
-    oh = (h - kh + 2 * ph) // sh + 1
-    ow = (w - kw + 2 * pw) // sw + 1
 
     # Create schedule config for input and output channel splitting
     cfg.define_split("tile_ic", ic, num_outputs=2)
@@ -333,7 +329,6 @@ def conv2d_NCHWc_cuda(cfg, data, kernel, strides,
         get_const_tuple(kernel.shape)
     dilated_kernel_h = (kernel_height - 1) * dh + 1
     dilated_kernel_w = (kernel_width - 1) * dw + 1
-    groups = ic_chunk // ic_chunk_group
 
     # output shape
     out_height = (ih + 2 * HPAD - dilated_kernel_h) // HSTR + 1
@@ -351,7 +346,6 @@ def conv2d_NCHWc_cuda(cfg, data, kernel, strides,
     kh = tvm.reduce_axis((0, kernel_height), name='kh')
     kw = tvm.reduce_axis((0, kernel_width), name='kw')
 
-    # else: fp implementation
     return tvm.compute(oshape, lambda n, oc_chunk, oh, ow, oc_block:
     tvm.sum(data_pad[n, ic//ic_bn, oh*HSTR+kh*dh, ow*WSTR+kw*dw,
                      ic%ic_bn].astype(out_dtype) *
@@ -377,11 +371,7 @@ def schedule_conv2d_NCHWc_cuda(cfg, outs):
 
         if 'conv2d_NCHWc' in op.tag:
             conv_out = op.output(0)
-            kernel = conv_out.op.input_tensors[1]
-            data_vec = conv_out.op.input_tensors[0]
-            args = [s, cfg, data_vec, conv_out, outs[0]]
-            _, _, kh, kw, _, _, = get_const_tuple(kernel.shape)
-            schedule_conv2d_NCHWc_cuda(*args)
+            schedule_direct_conv2d_NCHWc_cuda(s, cfg, conv_out)
 
         scheduled_ops.append(op)
 
