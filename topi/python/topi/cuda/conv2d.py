@@ -23,15 +23,16 @@ from tvm.autotvm.task import get_config
 from tvm.contrib import cudnn
 
 from ..nn.conv2d import conv2d_NCHWc, conv2d_alter_layout
-from .. import nn, generic
+from .. import nn, generic, tag
 from ..util import get_const_tuple, traverse_inline
+from ..nn.pad import pad
 
 from .conv2d_direct import schedule_direct_cuda, schedule_direct_conv2d_NCHWc_cuda
 from .conv2d_winograd import winograd_cuda, schedule_winograd_cuda
 from .conv2d_int8 import conv2d_NCHWc_int8, schedule_conv2d_NCHWc_int8
 
 
-@autotvm.register_topi_compute(nn.conv2d, ['cuda', 'gpu'], ['direct', 'winograd', 'int8'])
+@autotvm.register_topi_compute(nn.conv2d, ['cuda', 'gpu'], ['direct', 'winograd', 'int8', 'NCHWc'])
 def conv2d_cuda(cfg, data, kernel, strides, padding, dilation, layout='NCHW', out_dtype='float32'):
     """Conv2D operator for cuda backend.
 
@@ -112,6 +113,10 @@ def conv2d_cuda(cfg, data, kernel, strides, padding, dilation, layout='NCHW', ou
             return conv2d_NCHWc_int8(
                 cfg, data, kernel, strides, padding, dilation, layout, out_dtype)
 
+    if cfg.template_key == 'NCHWc':
+        data, kernel = _pack_data(cfg, data, kernel)
+        return conv2d_NCHWc_cuda(cfg, data, kernel, strides, padding, dilation, layout, None, out_dtype)
+
     if layout == 'NCHW':
         return nn.conv2d_nchw(data, kernel, strides, padding, dilation, out_dtype)
     if layout == 'HWCN':
@@ -152,13 +157,14 @@ def schedule_conv2d_nchw_cuda(cfg, outs):
             schedule_winograd_cuda(cfg, s, op.output(0), pre_computed=False)
         if op.tag == "conv2d_NCHWc_int8":
             schedule_conv2d_NCHWc_int8(cfg, s, op.output(0))
+        if op.tag == "conv2d_NCHWc":
+            schedule_direct_conv2d_NCHWc_cuda(cfg, s, op.output(0))
 
     traverse_inline(s, outs[0].op, _callback)
     return s
 
-
+"""
 def _create_tuning_space(cfg, data, kernel, strides, padding, dilation, layout):
-    """Create schedule configuration from input arguments"""
     dshape = get_const_tuple(data.shape)
     kshape = get_const_tuple(kernel.shape)
     pat = re.compile(r'NCHW.+(\d+)c')
@@ -229,7 +235,7 @@ def _topi_nn_conv2d_NCHWc(*args, **kwargs):
                           data_layout, out_layout, dtype)
     s = schedule_conv2d_NCHWc_cuda(cfg, [C])
     return s, [new_data, new_kernel, C]
-
+"""
 
 @conv2d_alter_layout.register("cuda")
 def _alter_conv2d_layout(attrs, inputs, tinfo, F):
@@ -314,21 +320,46 @@ def _alter_conv2d_layout(attrs, inputs, tinfo, F):
         return F.nn.contrib_conv2d_nchwc(*copy_inputs, **new_attrs)
 
 
-@autotvm.register_topi_compute(conv2d_NCHWc, ['cuda', 'gpu'], ['direct'])
-def conv2d_NCHWc_cuda(cfg, data, kernel, strides,
-                      padding, dilation, layout, out_layout, out_dtype):
+def _pack_data(cfg, data, kernel):
+    oc, ic, kh, kw = get_const_tuple(kernel.shape)
+    cfg.define_split("tile_ic", ic, num_outputs=2, filter=lambda y: 8 <= y.size[-1] <= 64)
+    cfg.define_split("tile_oc", oc, num_outputs=2, filter=lambda y: 8 <= y.size[-1] <= 64)
+    ic_bn, oc_bn = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
+
+    n, _, ih, iw = get_const_tuple(data.shape)
+    ic_chunk = ic // ic_bn
+    oc_chunk = oc // oc_bn
+
+    data = tvm.compute((n, ic_chunk, ih, iw, ic_bn),
+                       lambda n, c, h, w, vc: data[n, c*ic_bn + vc, h, w],
+                       name="packed_data")
+
+    kernel = tvm.compute(
+        (oc_chunk, ic_chunk, kh, kw, oc_bn, ic_bn),
+        lambda occ, icc, k_h, k_w, ocb, icb:
+        kernel[occ * oc_bn + ocb,
+               icc * ic_bn + icb, k_h, k_w],
+        name="packed_kernel")
+
+    return data, kernel
+
+
+#@autotvm.register_topi_compute(conv2d_NCHWc, ['cuda', 'gpu'], ['direct'])
+def conv2d_NCHWc_cuda(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
     # layout and out_layout are not used here,
     # we keep them for debug convenience when dumping autotvm workload
     HPAD, WPAD = padding if isinstance(padding, (tuple, list)) else (padding, padding)
     HSTR, WSTR = strides if isinstance(strides, (tuple, list)) else (strides, strides)
     dh, dw = dilation if isinstance(dilation, (tuple, list)) else (dilation, dilation)
 
-    n, ic_chunk, ih, iw, ic_bn = get_const_tuple(data.shape)
-    in_channel = ic_chunk * ic_bn
-    oc_chunk, ic_chunk_group, kernel_height, kernel_width, _, oc_bn = \
-        get_const_tuple(kernel.shape)
-    dilated_kernel_h = (kernel_height - 1) * dh + 1
-    dilated_kernel_w = (kernel_width - 1) * dw + 1
+    oc, ic, kh, kw = get_const_tuple(kernel.shape)
+    ic_bn, oc_bn = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
+
+    n, _, ih, iw = get_const_tuple(data.shape)
+    ic_chunk = ic // ic_bn
+    oc_chunk = oc // oc_bn
+    dilated_kernel_h = (kw - 1) * dh + 1
+    dilated_kernel_w = (kh - 1) * dw + 1
 
     # output shape
     out_height = (ih + 2 * HPAD - dilated_kernel_h) // HSTR + 1
@@ -342,38 +373,14 @@ def conv2d_NCHWc_cuda(cfg, data, kernel, strides,
     else:
         data_pad = data
 
-    ic = tvm.reduce_axis((0, in_channel), name='ic')
-    kh = tvm.reduce_axis((0, kernel_height), name='kh')
-    kw = tvm.reduce_axis((0, kernel_width), name='kw')
+    icc = tvm.reduce_axis((0, ic_chunk), name='ic_chunk')
+    icb = tvm.reduce_axis((0, ic_bn), name='ic_block')
+    kh = tvm.reduce_axis((0, kh), name='kh')
+    kw = tvm.reduce_axis((0, kw), name='kw')
 
-    return tvm.compute(oshape, lambda n, oc_chunk, oh, ow, oc_block:
-    tvm.sum(data_pad[n, ic//ic_bn, oh*HSTR+kh*dh, ow*WSTR+kw*dw,
-                     ic%ic_bn].astype(out_dtype) *
-            kernel[oc_chunk, ic//ic_bn, kh, kw, ic%ic_bn, oc_block],
-            axis=[ic, kh, kw]),
+    return tvm.compute(oshape, lambda bs, occ, oh, ow, oc_block:
+    tvm.sum(data_pad[bs, icc, oh*HSTR+kh*dh, ow*WSTR+kw*dw,
+                     icb].astype(out_dtype) *
+            kernel[occ, icc, kh, kw, icb, oc_block],
+            axis=[icc, kh, kw, icb]),
                        name='conv2d_NCHWc', tag="conv2d_NCHWc")
-
-@autotvm.register_topi_schedule(generic.schedule_conv2d_NCHWc, 'cpu', ['direct'])
-def schedule_conv2d_NCHWc_cuda(cfg, outs):
-    """Create schedule for tensors"""
-    s = tvm.create_schedule([x.op for x in outs])
-    scheduled_ops = []
-
-    def traverse(op):
-        """Traverse operators from computation graph"""
-        # inline all one-to-one-mapping operators except the last stage (output)
-        if tag.is_broadcast(op.tag):
-            if op not in s.outputs:
-                s[op].compute_inline()
-            for tensor in op.input_tensors:
-                if tensor.op.input_tensors and tensor.op not in scheduled_ops:
-                    traverse(tensor.op)
-
-        if 'conv2d_NCHWc' in op.tag:
-            conv_out = op.output(0)
-            schedule_direct_conv2d_NCHWc_cuda(s, cfg, conv_out)
-
-        scheduled_ops.append(op)
-
-    traverse(outs[0].op)
-    return s
