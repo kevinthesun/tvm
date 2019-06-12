@@ -24,7 +24,6 @@ from ..util import get_const_tuple
 
 def schedule_direct_cuda(cfg, s, conv):
     """schedule optimized for batch size = 1"""
-
     ##### space definition begin #####
     n, f, y, x = s[conv].op.axis
     rc, ry, rx = s[conv].op.reduce_axis
@@ -118,9 +117,20 @@ def schedule_direct_cuda(cfg, s, conv):
     _, KH, KW, CI = get_const_tuple(kernel.shape)
     cfg.add_flop(2 * N * OH * OW * CO * CI * KH * KW)
 
-_dp4a = dp4a('shared', 'shared', 'local')
-def schedule_direct_conv2d_NCHWc_cuda(s, cfg, conv):
+def schedule_direct_conv2d_NCHWc_cuda(cfg, s, conv):
     """Schedule conv2d NCHWc template"""
+    # tile and bind spatial axes
+    n, f, y, x, c = s[conv].op.axis
+    cfg.define_split("tile_n", cfg.axis(n), num_outputs=4)
+    cfg.define_split("tile_f", cfg.axis(f), num_outputs=4)
+    cfg.define_split("tile_y", cfg.axis(y), num_outputs=4)
+    cfg.define_split("tile_x", cfg.axis(x), num_outputs=4)
+
+    rc, ry, rx, rc_block = s[conv].op.reduce_axis
+    cfg.define_split("tile_rc", cfg.axis(rc), num_outputs=2)
+    cfg.define_split("tile_ry", cfg.axis(ry), num_outputs=2)
+    cfg.define_split("tile_rx", cfg.axis(rx), num_outputs=2)    
+
     packed_data, packed_kernel = conv.op.input_tensors
 
     if isinstance(packed_data.op, tvm.tensor.ComputeOp) and "pad" in packed_data.op.tag:
@@ -150,23 +160,13 @@ def schedule_direct_conv2d_NCHWc_cuda(s, cfg, conv):
         OL = conv
 
     # create cache stage
-    AA = s.cache_read(pad_data, 'shared', [conv])
-    WW = s.cache_read(packed_kernel, 'shared', [conv])
+    AA = s.cache_read(pad_data, 'shared', [OL])
+    WW = s.cache_read(packed_kernel, 'shared', [OL])
 
-    s[conv].set_scope('local')
-
-    # handle bias
-    if conv.op not in s.outputs:
-        s[conv].compute_inline()
-        output = s.outputs[0].output(0)
+    #s[conv].set_scope('local')
 
     # tile and bind spatial axes
     n, f, y, x, c = s[conv].op.axis
-    cfg.define_split("tile_n", cfg.axis(n), num_outputs=4)
-    cfg.define_split("tile_f", cfg.axis(f), num_outputs=4)
-    cfg.define_split("tile_y", cfg.axis(y), num_outputs=4)
-    cfg.define_split("tile_x", cfg.axis(x), num_outputs=4)
-
     # this is the scope to attach global config inside this kernel
     kernel_scope, n = s[conv].split(n, nparts=1)
 
@@ -190,6 +190,7 @@ def schedule_direct_conv2d_NCHWc_cuda(s, cfg, conv):
         s[conv].bind(tf, tvm.thread_axis("threadIdx.y"))
         tyx = s[conv].fuse(ty, tx)
         s[conv].bind(tyx, tvm.thread_axis("threadIdx.x"))
+        s[OL].compute_at(s[conv], tyx)
 
         # number of threads
         n_tz = cfg["tile_n"].size[2]
@@ -199,7 +200,7 @@ def schedule_direct_conv2d_NCHWc_cuda(s, cfg, conv):
         s[conv].bind(s[conv].fuse(tn, tf), tvm.thread_axis("threadIdx.z"))
         s[conv].bind(ty, tvm.thread_axis("threadIdx.y"))
         s[conv].bind(tx, tvm.thread_axis("threadIdx.x"))
-
+        s[OL].compute_at(s[conv], tx)
         # number of threads
         n_tz = cfg["tile_n"].size[2] * cfg["tile_f"].size[2]
         n_ty = cfg["tile_y"].size[2]
@@ -207,23 +208,16 @@ def schedule_direct_conv2d_NCHWc_cuda(s, cfg, conv):
 
     # tile and bind reduction axes
     n, f, y, x, c = s[OL].op.axis
-
     rc, ry, rx, rc_block = s[OL].op.reduce_axis
-    cfg.define_split("tile_rc", cfg.axis(rc), num_outputs=2)
-    cfg.define_split("tile_ry", cfg.axis(ry), num_outputs=2)
-    cfg.define_split("tile_rx", cfg.axis(rx), num_outputs=2)
-    rco, rci = cfg['tile_rc'].apply(s, conv, rc)
-    ryo, ryi = cfg['tile_ry'].apply(s, conv, ry)
-    rxo, rxi = cfg['tile_rx'].apply(s, conv, rx)
+    rco, rci = cfg['tile_rc'].apply(s, OL, rc)
+    ryo, ryi = cfg['tile_ry'].apply(s, OL, ry)
+    rxo, rxi = cfg['tile_rx'].apply(s, OL, rx)
 
     s[OL].reorder(rco, ryo, rxo, rci, ryi, rxi, n, f, y, x, c, rc_block)
 
     cfg.define_reorder("reorder_inner", [rco, ryo, rxo], policy="all")
-    cfg["reorder_inner"].apply(s, conv, [rco, ryo, rxo])
-    cfg["reorder_inner"].apply(s, conv, [rci, ryi, rxi])
-
-    _, rc_block = s[OL].split(rc_block, factor=4)
-    s[OL].tensorize(rc_block, _dp4a)
+    cfg["reorder_inner"].apply(s, OL, [rco, ryo, rxo])
+    cfg["reorder_inner"].apply(s, OL, [rci, ryi, rxi])
 
     cache_loc = [rco, ryo, rxo][cfg["reorder_inner"].perm[-1]]
     s[AA].compute_at(s[OL], cache_loc)

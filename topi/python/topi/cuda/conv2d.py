@@ -125,7 +125,7 @@ def conv2d_cuda(cfg, data, kernel, strides, padding, dilation, layout='NCHW', ou
 
 
 @autotvm.register_topi_schedule(generic.schedule_conv2d_nchw, ["cuda", "gpu"],
-                                ["direct", 'winograd', "int8"])
+                                ["direct", 'winograd', "int8", "NCHWc"])
 def schedule_conv2d_nchw_cuda(cfg, outs):
     """TOPI schedule callback of conv2d for cuda gpu
 
@@ -163,167 +163,11 @@ def schedule_conv2d_nchw_cuda(cfg, outs):
     traverse_inline(s, outs[0].op, _callback)
     return s
 
-"""
-def _create_tuning_space(cfg, data, kernel, strides, padding, dilation, layout):
-    dshape = get_const_tuple(data.shape)
-    kshape = get_const_tuple(kernel.shape)
-    pat = re.compile(r'NCHW.+(\d+)c')
-    if layout == 'NCHW':
-        n, ic, h, w = dshape
-        oc, _, kh, kw = kshape
-    elif layout == 'NHWC':
-        n, h, w, ic = dshape
-        kh, kw, oc, _ = kshape
-    elif pat.match(layout) is not None:
-        n, ic_chunk, h, w, ic_bn = dshape
-        oc_chunk, k_ic_chunk, kh, kw, k_ic_bn, oc_bn = kshape
-        assert ic_chunk == k_ic_chunk
-        assert ic_bn == k_ic_bn
-        ic = ic_chunk*ic_bn
-        oc = oc_chunk*oc_bn
-    else:
-        raise ValueError("Not support this layout {} with "
-                         "schedule template.".format(layout))
-
-    # Create schedule config for input and output channel splitting
-    cfg.define_split("tile_ic", ic, num_outputs=2)
-    cfg.define_split("tile_oc", oc, num_outputs=2)
-    cfg.define_split("tile_n", n, num_outputs=4)
-    cfg.define_split("tile_f", oc // cfg["tile_oc"].size(-1), num_outputs=4)
-    cfg.define_split("tile_y", h, num_outputs=4)
-    cfg.define_split("tile_x", w, num_outputs=4)
-    cfg.define_knob("fuse_yx", [0, 1])
-    cfg.define_knob('AA_double_buffer', [0, 1])
-    cfg.define_knob('WW_double_buffer', [0, 1])
-    cfg.define_knob("auto_unroll_max_step", [0, 512, 1500])
-
-
-# Define template function for autotvm task
-# We define schedule template in this function instead of
-# declaration function since actual input arguments need
-# to be altered by the schedule selected.
-@autotvm.task.register("topi_cuda_conv2d_NCHWc")
-def _topi_nn_conv2d_NCHWc(*args, **kwargs):
-    assert not kwargs, "Do not support kwargs in template function call"
-    args = deserialize_args(args)
-
-    if len(args) == 7:
-        data, kernel, strides, padding, dilation, origin_layout, dtype = args
-    else:
-        assert len(args) == 8
-        data, kernel, strides, padding, dilation, origin_layout, out_layout, dtype = args
-
-    raw_data_shape = get_const_tuple(data.shape)
-    raw_kernel_shape = get_const_tuple(kernel.shape)
-
-    # get config here
-    cfg = get_config()
-    _create_tuning_space(cfg, data, kernel, strides, padding, dilation, origin_layout)
-
-    # change shape with the value in config
-    ic_bn, oc_bn = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
-    new_data_shape = (raw_data_shape[0], raw_data_shape[1] // ic_bn,
-                      raw_data_shape[2], raw_data_shape[3], ic_bn)
-    data_layout = "NCHW%dc" % ic_bn
-    out_layout = "NCHW%dc" % oc_bn
-    new_kernel_shape = (raw_kernel_shape[0] // oc_bn, raw_kernel_shape[1] // ic_bn,
-                        raw_kernel_shape[2], raw_kernel_shape[3], ic_bn, oc_bn)
-    new_data = tvm.placeholder(new_data_shape, data.dtype)
-    new_kernel = tvm.placeholder(new_kernel_shape, kernel.dtype)
-
-    C = conv2d_NCHWc_cuda(cfg, new_data, new_kernel, strides, padding, dilation,
-                          data_layout, out_layout, dtype)
-    s = schedule_conv2d_NCHWc_cuda(cfg, [C])
-    return s, [new_data, new_kernel, C]
-"""
-
-@conv2d_alter_layout.register("cuda")
-def _alter_conv2d_layout(attrs, inputs, tinfo, F):
-
-    copy_inputs = [s for s in inputs]
-    new_attrs = {k : attrs[k] for k in attrs.keys()}
-
-    if F.__name__ == 'tvm.relay.op':
-        # Derive channels for frontends (e.g ONNX) that miss "channel" field.
-        new_attrs["channels"] = inputs[1].checked_type.shape[attrs['kernel_layout'].index('O')]
-
-    data, kernel = tinfo[0], tinfo[1]
-    batch_size, in_channel, height, width = get_const_tuple(data.shape)
-
-    groups = attrs.get_int("groups")
-    out_channel = attrs.get_int("channels") \
-        if F.__name__ == 'nnvm.symbol' else new_attrs["channels"]
-    padding = attrs.get_int_tuple("padding")
-    strides = attrs.get_int_tuple("strides")
-    dilation = attrs.get_int_tuple("dilation")
-    out_dtype = attrs["out_dtype"]
-
-    layout_name = 'layout' if F.__name__ == 'nnvm.symbol' else 'data_layout'
-
-    layout = attrs[layout_name]
-    kh, kw = attrs.get_int_tuple("kernel_size")
-
-    dtype = data.dtype
-    out_dtype = dtype if out_dtype in ("same", "") else out_dtype
-    is_depthwise = groups == in_channel and groups == out_channel
-
-    # only optimize for NCHW
-    if layout != 'NCHW':
-        return None
-    if groups != 1 and not is_depthwise:
-        return None
-
-    dispatch_ctx = autotvm.task.DispatchContext.current
-    target = tvm.target.current_target()
-    # query schedule and fallback if necessary
-    workload = autotvm.task.args_to_workload(
-        [data, kernel, strides, padding, dilation, out_dtype], depthwise_conv2d_nchw) \
-        if is_depthwise else \
-        autotvm.task.args_to_workload(
-            [data, kernel, strides, padding, dilation, layout, out_dtype], conv2d)
-    cfg = dispatch_ctx.query(target, workload)
-    if cfg.is_fallback:
-        _get_default_config(cfg, data, kernel, strides, padding, out_dtype, is_depthwise)
-
-    ic_bn, oc_bn = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
-
-    new_attrs[layout_name] = 'NCHW%dc' % ic_bn
-    new_attrs['out_layout'] = 'NCHW%dc' % oc_bn
-
-    new_data = tvm.placeholder((batch_size, in_channel//ic_bn, height, width, ic_bn),
-                               dtype=data.dtype)
-
-    if is_depthwise:
-        raise RuntimeError("Not supported depthwise conv2d for cuda now.")
-    else:
-        out_channel, _, kh, kw = get_const_tuple(kernel.shape)
-        # (oc, ic, h, w) -> (OC, IC, h, w, ic, oc)
-        new_attrs['kernel_layout'] = 'OIHW%di%do' % (ic_bn, oc_bn)
-
-        # Store altered operator's config
-        new_kernel = tvm.placeholder((out_channel//oc_bn, in_channel//ic_bn, kh, kw, ic_bn, oc_bn),
-                                     dtype=kernel.dtype)
-        new_workload = autotvm.task.args_to_workload(
-            [new_data, new_kernel, strides, padding, dilation, new_attrs[layout_name],
-             new_attrs['out_layout'], out_dtype], conv2d_NCHWc)
-
-    dispatch_ctx.update(target, new_workload, cfg)
-
-    if is_depthwise:
-        if F.__name__ == 'nnvm.symbol':
-            logging.warning("Use native layout for depthwise convolution on NNVM.")
-            return None
-        return F.nn.contrib_depthwise_conv2d_nchwc(*copy_inputs, **new_attrs)
-    else:
-        if F.__name__ == 'nnvm.symbol':
-            return F.contrib.conv2d_NCHWc(*copy_inputs, **new_attrs)
-        return F.nn.contrib_conv2d_nchwc(*copy_inputs, **new_attrs)
-
 
 def _pack_data(cfg, data, kernel):
     oc, ic, kh, kw = get_const_tuple(kernel.shape)
-    cfg.define_split("tile_ic", ic, num_outputs=2, filter=lambda y: 8 <= y.size[-1] <= 64)
-    cfg.define_split("tile_oc", oc, num_outputs=2, filter=lambda y: 8 <= y.size[-1] <= 64)
+    cfg.define_split("tile_ic", ic, num_outputs=2, filter=lambda y: 4 <= y.size[-1] <= 16)
+    cfg.define_split("tile_oc", oc, num_outputs=2, filter=lambda y: 4 <= y.size[-1] <= 16)
     ic_bn, oc_bn = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
 
     n, _, ih, iw = get_const_tuple(data.shape)
@@ -331,7 +175,7 @@ def _pack_data(cfg, data, kernel):
     oc_chunk = oc // oc_bn
 
     data = tvm.compute((n, ic_chunk, ih, iw, ic_bn),
-                       lambda n, c, h, w, vc: data[n, c*ic_bn + vc, h, w],
+                       lambda bs, c, h, w, vc: data[bs, c*ic_bn + vc, h, w],
                        name="packed_data")
 
     kernel = tvm.compute(
@@ -352,12 +196,9 @@ def conv2d_NCHWc_cuda(cfg, data, kernel, strides, padding, dilation, layout, out
     HSTR, WSTR = strides if isinstance(strides, (tuple, list)) else (strides, strides)
     dh, dw = dilation if isinstance(dilation, (tuple, list)) else (dilation, dilation)
 
-    oc, ic, kh, kw = get_const_tuple(kernel.shape)
-    ic_bn, oc_bn = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
+    oc_chunk, ic_chunk, kh, kw, oc_bn, ic_bn = get_const_tuple(kernel.shape)
 
-    n, _, ih, iw = get_const_tuple(data.shape)
-    ic_chunk = ic // ic_bn
-    oc_chunk = oc // oc_bn
+    n, _, ih, iw, _ = get_const_tuple(data.shape)
     dilated_kernel_h = (kw - 1) * dh + 1
     dilated_kernel_w = (kh - 1) * dw + 1
 
@@ -381,6 +222,6 @@ def conv2d_NCHWc_cuda(cfg, data, kernel, strides, padding, dilation, layout, out
     return tvm.compute(oshape, lambda bs, occ, oh, ow, oc_block:
     tvm.sum(data_pad[bs, icc, oh*HSTR+kh*dh, ow*WSTR+kw*dw,
                      icb].astype(out_dtype) *
-            kernel[occ, icc, kh, kw, icb, oc_block],
+            kernel[occ, icc, kh, kw, oc_block, icb],
             axis=[icc, kh, kw, icb]),
                        name='conv2d_NCHWc', tag="conv2d_NCHWc")
