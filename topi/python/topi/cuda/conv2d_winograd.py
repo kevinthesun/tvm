@@ -21,13 +21,13 @@ import tvm
 from tvm import autotvm
 
 from .. import nn
-from ..nn import conv2d, group_conv2d_nchw, conv2d_winograd_without_weight_transform
+from ..nn import conv2d_winograd_without_weight_transform
 from ..util import get_const_int, get_const_tuple, traverse_inline
 from ..generic import schedule_conv2d_winograd_without_weight_transform
 from ..nn.winograd_util import winograd_transform_matrices
 
 
-def _infer_tile_size(data, kernel):
+def infer_tile_size(data, kernel):
     N, CI, H, W = get_const_tuple(data.shape)
 
     if H % 8 == 0:
@@ -38,7 +38,7 @@ def winograd_cuda(cfg, data, kernel, strides, padding, dilation, layout, out_dty
     """Compute declaration for winograd"""
     assert layout == 'NCHW'
 
-    tile_size = _infer_tile_size(data, kernel)
+    tile_size = infer_tile_size(data, kernel)
 
     N, CI, H, W = get_const_tuple(data.shape)
 
@@ -296,141 +296,3 @@ def schedule_conv2d_winograd_without_weight_transform_cuda(cfg, outs):
     traverse_inline(s, outs[0].op, _callback)
     return s
 
-
-##### REGISTER ALTER OP LAYOUT #####
-@nn.conv2d_alter_layout.register(["cuda", "gpu"])
-def _alter_conv2d_layout(attrs, inputs, tinfos, F):
-    """Alter op layout for pre-computing kernel transformation
-
-    Parameters
-    ----------
-    attrs : nnvm.top.AttrDict or tvm.attrs.Attrs
-        Attributes of current convolution
-    inputs : nnvm.symbol or tvm.relay.Expr
-        Grouped input symbols
-    tinfos : list
-        Input shape and dtype
-    F: symbol
-        The context, can be either nnvm.sym or relay.op
-
-    Note
-    ----
-    Unlike other TOPI functions, this function operates on both graph level and operator level,
-    so we have to pass 'F' to make it support our two versions of graph IR, NNVM and Relay.
-    """
-    if 'cudnn' in tvm.target.current_target().libs or 'miopen' in tvm.target.current_target().libs:
-        return None
-
-    copy_inputs = [s for s in inputs]
-    new_attrs = {k: attrs[k] for k in attrs.keys()}
-
-    if F.__name__ == 'tvm.relay.op':
-        # Derive channels for frontends (e.g ONNX) that miss "channel" field.
-        new_attrs["channels"] = inputs[1].checked_type.shape[attrs['kernel_layout'].index('O')]
-
-    strides = attrs.get_int_tuple("strides")
-    padding = attrs.get_int_tuple("padding")
-    dilation = attrs.get_int_tuple("dilation")
-    groups = attrs.get_int('groups')
-    data_layout_key = "data_layout" if "data_layout" in new_attrs else "layout"
-    layout = attrs[data_layout_key]
-    out_dtype = attrs["out_dtype"]
-    if out_dtype in ("", "same"):
-        out_dtype = tinfos[0].dtype
-
-    data, kernel = tinfos[0:2]
-    N, CI, H, W = get_const_tuple(data.shape)
-    CO, _, KH, KW = get_const_tuple(kernel.shape)
-
-    dispatch_ctx = autotvm.DispatchContext.current
-    target = tvm.target.current_target()
-
-    if groups == 1:
-        # query config of this workload
-        workload = autotvm.task.args_to_workload(
-            [tinfos[0], tinfos[1], strides, padding, dilation, layout, out_dtype], conv2d)
-        cfg = autotvm.DispatchContext.current.query(target, workload)
-
-        if cfg.is_fallback:  # if is fallback, clear query cache and return None
-            autotvm.task.clear_fallback_cache(target, workload)
-            return None
-
-        if cfg.template_key == 'direct':
-            return None
-
-        if cfg.template_key == 'int8':
-            assert 'cuda' in target.keys
-            new_layout = 'NCHW4c'
-            new_attrs[data_layout_key] = new_layout
-            new_attrs['out_layout'] = new_layout
-            new_attrs['kernel_layout'] = 'OIHW4o4i'
-            ic_block_factor = oc_block_factor = 4
-
-            # Store the same config for the altered operator (workload)
-            new_data = tvm.placeholder((N, CI // ic_block_factor, H, W, ic_block_factor),
-                                       dtype=data.dtype)
-            new_kernel = tvm.placeholder((CO // oc_block_factor, CI // ic_block_factor, KH, KW,\
-                                         oc_block_factor, ic_block_factor), dtype=kernel.dtype)
-            new_workload = autotvm.task.args_to_workload(
-                [new_data, new_kernel, strides, padding, dilation, new_layout, out_dtype],
-                conv2d
-            )
-            dispatch_ctx.update(target, new_workload, cfg)
-            return F.nn.conv2d(*copy_inputs, **new_attrs)
-
-        if attrs.get_int_tuple("dilation") != (1, 1):
-            warnings.warn("Does not support weight pre-transform for dilated convolution.")
-            return None
-
-        # pre-compute weight transformation in winograd
-        tile_size = _infer_tile_size(tinfos[0], tinfos[1])
-
-        weight = F.nn.contrib_conv2d_winograd_weight_transform(copy_inputs[1],
-                                                               tile_size=tile_size)
-        weight = F.transpose(weight, axes=[0, 1, 3, 2])
-        copy_inputs[1] = weight
-        new_attrs['tile_size'] = tile_size
-
-        # Store the same config for the altered operator (workload)
-        new_data = data
-        new_weight = tvm.placeholder((KH + tile_size - 1, KW + tile_size - 1, CI, CO),
-                                     dtype=kernel.dtype)
-        new_workload = autotvm.task.args_to_workload(
-            [new_data, new_weight, strides, padding, dilation, layout, out_dtype, tile_size],
-            conv2d_winograd_without_weight_transform
-        )
-        dispatch_ctx.update(target, new_workload, cfg)
-        return F.nn.contrib_conv2d_winograd_without_weight_transform(*copy_inputs, **new_attrs)
-    if groups != CI:
-        workload = autotvm.task.args_to_workload(
-            [tinfos[0], tinfos[1], strides, padding, dilation, groups, out_dtype],
-            group_conv2d_nchw)
-        cfg = autotvm.DispatchContext.current.query(target, workload)
-
-        if cfg.is_fallback:  # if is fallback, clear query cache and return None
-            autotvm.task.clear_fallback_cache(target, workload)
-            return None
-
-        if cfg.template_key == 'int8':
-            assert 'cuda' in target.keys
-            new_layout = 'NCHW4c'
-            new_attrs[data_layout_key] = new_layout
-            new_attrs['out_layout'] = new_layout
-            new_attrs['kernel_layout'] = 'OIHW4o4i'
-            ic_block_factor = oc_block_factor = 4
-
-            # Store the same config for the altered operator (workload)
-            new_data = tvm.placeholder((N, CI // ic_block_factor, H, W, ic_block_factor),
-                                       dtype=data.dtype)
-            new_kernel = tvm.placeholder((CO // oc_block_factor, CI // ic_block_factor // groups,\
-                                         KH, KW, oc_block_factor, ic_block_factor),
-                                         dtype=kernel.dtype)
-            new_workload = autotvm.task.args_to_workload(
-                [new_data, new_kernel, strides, padding, dilation, groups, out_dtype],
-                group_conv2d_nchw
-            )
-            dispatch_ctx.update(target, new_workload, cfg)
-            return F.nn.conv2d(*copy_inputs, **new_attrs)
-
-    # do nothing for depthwise convolution
-    return None
