@@ -210,7 +210,7 @@ def _pack_data(cfg, data, kernel):
     return data, kernel
 
 
-@autotvm.register_topi_compute(conv2d_NCHWc, ['cuda', 'gpu'], ['direct'])
+@autotvm.register_topi_compute(conv2d_NCHWc, ['cuda', 'gpu'], ['NCHWc'])
 def conv2d_NCHWc_cuda(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
     # layout and out_layout are not used here,
     # we keep them for debug convenience when dumping autotvm workload
@@ -250,7 +250,7 @@ def conv2d_NCHWc_cuda(cfg, data, kernel, strides, padding, dilation, layout, out
 
 
 @autotvm.register_topi_schedule(generic.schedule_conv2d_NCHWc, ["cuda", "gpu"],
-                                ["direct"])
+                                ["NCHWc"])
 def schedule_conv2d_NCHWc_cuda(cfg, outs):
     """TOPI schedule callback of conv2d_NCHWc for cuda gpu
 
@@ -273,13 +273,13 @@ def schedule_conv2d_NCHWc_cuda(cfg, outs):
 
     def _callback(op):
         if op.tag == "conv2d_NCHWc":
-            schedule_direct_conv2d_NCHWc_cuda(cfg, s, op.output(0))
+            schedule_conv2d_nchwc_cuda(cfg, s, op.output(0))
 
     traverse_inline(s, outs[0].op, _callback)
     return s
 
 
-@conv2d_infer_layout.register("cpu")
+@conv2d_infer_layout.register(["cuda", "gpu"])
 def _conv2d_infer_layout(workload, cfg):
     _, data, kernel, strides, padding, dilation, layout, dtype = workload
     batch_size, in_channel, in_height, in_width = data[:-1]
