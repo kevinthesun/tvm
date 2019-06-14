@@ -29,7 +29,12 @@ from ..nn.winograd_util import winograd_transform_matrices
 
 
 def infer_tile_size(data, kernel):
-    N, CI, H, W = get_const_tuple(data.shape)
+    if len(data.shape) == 4:
+        N, CI, H, W = get_const_tuple(data.shape)
+    elif len(data.shape) == 5:
+        N, CI_CHUNK, H, W, CI_BLOCK = get_const_tuple(data.shape)
+    else:
+        raise RuntimeError("Cuda conv2d winograd only supports 4-D or 5-D input data.")
 
     if H % 8 == 0:
         return 4
@@ -584,9 +589,7 @@ def schedule_winograd_NCHWc_cuda(cfg, s, output, pre_computed):
     inverse_scope, n = s[output].split(n, nparts=1)
 
     fused = s[output].fuse(n, co_chunk, ho, wo)
-    cfg.define_split("split_out", fused, num_outputs=2,
-                     filter=lambda item: item.size[-1] <= 64)
-    bb, tt = cfg["split_out"].apply(s, output, fused)
+    bb, tt = s[output].split(fused, 128 // cfg["tile_oc"].val)
 
     s[output].bind(bb, tvm.thread_axis("blockIdx.x"))
     s[output].bind(tt, tvm.thread_axis("threadIdx.x"))

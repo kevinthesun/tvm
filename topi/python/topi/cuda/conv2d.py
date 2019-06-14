@@ -469,7 +469,8 @@ def _alter_conv2d_layout(attrs, inputs, tinfos, F):
             new_attrs[data_layout_key] = 'NCHW%dc' % ic_bn
             new_attrs['out_layout'] = 'NCHW%dc' % oc_bn
             new_data = tvm.placeholder((N, CI // ic_bn, H, W, ic_bn), dtype=data.dtype)
-            new_kernel = tvm.placeholder(weight.checked_type.shape, dtype=kernel.dtype)
+            new_kernel = tvm.placeholder((KH + tile_size - 1, KW + tile_size - 1, CI, CO), 
+                                         dtype=kernel.dtype)
             new_workload = autotvm.task.args_to_workload(
                 [new_data, new_kernel, strides, padding, dilation, new_attrs[data_layout_key],
                  new_attrs['out_layout'], out_dtype], conv2d_NCHWc)
