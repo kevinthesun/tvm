@@ -714,7 +714,7 @@ RELAY_REGISTER_OP("nn.contrib_depthwise_conv2d_NCHWc")
 .add_argument("data", "Tensor", "The input tensor.")
 .add_argument("weight", "Tensor", "The weight tensor.")
 .set_support_level(10)
-.add_type_rel("Conv2D", Conv2DWinogradRel<Conv2DAttrs>)
+.add_type_rel("Conv2DNCHWc", Conv2DWinogradRel<Conv2DAttrs>)
 .set_attr<FInferCorrectLayout>("FInferCorrectLayout",
         Conv2DInferCorrectLayout<Conv2DAttrs>);
 
