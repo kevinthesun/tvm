@@ -341,7 +341,7 @@ def _conv2d_infer_layout(workload, cfg):
     out_height = (in_height + 2 * padding[0] - k_height) // strides[0] + 1
     out_width = (in_width + 2 * padding[1] - k_width) // strides[1] + 1
 
-    if cfg.template_key == "NCHWc":
+    if "NCHWc" in cfg.template_key:
         tile_ic, tile_oc = cfg["tile_ic"].size[-1], cfg["tile_oc"].size[-1]
         in_shape = (batch_size, in_channel // tile_ic, in_height, in_width, tile_ic)
         in_layout = "NCHW%dc" % tile_ic
