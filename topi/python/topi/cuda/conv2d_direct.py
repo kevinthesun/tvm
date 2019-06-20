@@ -155,52 +155,54 @@ def schedule_conv2d_nchwc_cuda(cfg, s, conv):
         s[pad_data].compute_inline()
 
     if conv.op in s.outputs:
+        output = conv
         OL = s.cache_write(conv, 'local')
     else:
+        output = s.outputs[0].output(0)
+        s[conv].set_scope('local')
         OL = conv
 
     # create cache stage
     AA = s.cache_read(pad_data, 'shared', [OL])
     WW = s.cache_read(packed_kernel, 'shared', [OL])
 
-    #s[conv].set_scope('local')
 
     # tile and bind spatial axes
-    n, f, y, x, c = s[conv].op.axis
+    n, f, y, x, c = s[output].op.axis
     # this is the scope to attach global config inside this kernel
-    kernel_scope, n = s[conv].split(n, nparts=1)
+    kernel_scope, n = s[output].split(n, nparts=1)
 
-    bn, vn, tn, ni = cfg["tile_n"].apply(s, conv, n)
-    bf, vf, tf, fi = cfg["tile_f"].apply(s, conv, f)
-    by, vy, ty, yi = cfg["tile_y"].apply(s, conv, y)
-    bx, vx, tx, xi = cfg["tile_x"].apply(s, conv, x)
+    bn, vn, tn, ni = cfg["tile_n"].apply(s, output, n)
+    bf, vf, tf, fi = cfg["tile_f"].apply(s, output, f)
+    by, vy, ty, yi = cfg["tile_y"].apply(s, output, y)
+    bx, vx, tx, xi = cfg["tile_x"].apply(s, output, x)
 
-    s[conv].reorder(bn, bf, by, bx, vn, vf, vy, vx, tn, tf, ty, tx, ni, fi, yi, xi)
-    s[conv].bind(bn, tvm.thread_axis("blockIdx.z"))
-    s[conv].bind(bf, tvm.thread_axis("blockIdx.y"))
-    s[conv].bind(s[conv].fuse(by, bx), tvm.thread_axis("blockIdx.x"))
-    s[conv].bind(vn, tvm.thread_axis("vthread"))
-    s[conv].bind(vf, tvm.thread_axis("vthread"))
-    s[conv].bind(vy, tvm.thread_axis("vthread"))
-    s[conv].bind(vx, tvm.thread_axis("vthread"))
+    s[output].reorder(bn, bf, by, bx, vn, vf, vy, vx, tn, tf, ty, tx, ni, fi, yi, xi)
+    s[output].bind(bn, tvm.thread_axis("blockIdx.z"))
+    s[output].bind(bf, tvm.thread_axis("blockIdx.y"))
+    s[output].bind(s[output].fuse(by, bx), tvm.thread_axis("blockIdx.x"))
+    s[output].bind(vn, tvm.thread_axis("vthread"))
+    s[output].bind(vf, tvm.thread_axis("vthread"))
+    s[output].bind(vy, tvm.thread_axis("vthread"))
+    s[output].bind(vx, tvm.thread_axis("vthread"))
 
     cfg.define_knob("fuse_yx", [0, 1]) # fuse ty,tx or tn,tf
     if cfg["fuse_yx"].val:
-        s[conv].bind(tn, tvm.thread_axis("threadIdx.z"))
-        s[conv].bind(tf, tvm.thread_axis("threadIdx.y"))
-        tyx = s[conv].fuse(ty, tx)
-        s[conv].bind(tyx, tvm.thread_axis("threadIdx.x"))
-        s[OL].compute_at(s[conv], tyx)
+        s[output].bind(tn, tvm.thread_axis("threadIdx.z"))
+        s[output].bind(tf, tvm.thread_axis("threadIdx.y"))
+        tyx = s[output].fuse(ty, tx)
+        s[output].bind(tyx, tvm.thread_axis("threadIdx.x"))
+        s[OL].compute_at(s[output], tyx)
 
         # number of threads
         n_tz = cfg["tile_n"].size[2]
         n_ty = cfg["tile_f"].size[2]
         n_tx = cfg["tile_y"].size[2] * cfg["tile_x"].size[2]
     else:
-        s[conv].bind(s[conv].fuse(tn, tf), tvm.thread_axis("threadIdx.z"))
-        s[conv].bind(ty, tvm.thread_axis("threadIdx.y"))
-        s[conv].bind(tx, tvm.thread_axis("threadIdx.x"))
-        s[OL].compute_at(s[conv], tx)
+        s[output].bind(s[output].fuse(tn, tf), tvm.thread_axis("threadIdx.z"))
+        s[output].bind(ty, tvm.thread_axis("threadIdx.y"))
+        s[output].bind(tx, tvm.thread_axis("threadIdx.x"))
+        s[OL].compute_at(s[output], tx)
         # number of threads
         n_tz = cfg["tile_n"].size[2] * cfg["tile_f"].size[2]
         n_ty = cfg["tile_y"].size[2]
@@ -248,8 +250,8 @@ def schedule_conv2d_nchwc_cuda(cfg, s, conv):
 
     # unroll
     cfg.define_knob("auto_unroll_max_step", [0, 512, 1500])
-    s[conv].pragma(kernel_scope, 'auto_unroll_max_step',
-                   cfg['auto_unroll_max_step'].val)
-    s[conv].pragma(kernel_scope, 'unroll_explicit', False)
+    s[output].pragma(kernel_scope, 'auto_unroll_max_step',
+                     cfg['auto_unroll_max_step'].val)
+    s[output].pragma(kernel_scope, 'unroll_explicit', False)
 
     return s

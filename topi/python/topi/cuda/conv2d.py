@@ -419,10 +419,10 @@ def _alter_conv2d_layout(attrs, inputs, tinfos, F):
             ic_bn, oc_bn = cfg["tile_ic"].val, cfg["tile_oc"].val
             new_attrs[data_layout_key] = 'NCHW%dc' % ic_bn
             new_attrs['out_layout'] = 'NCHW%dc' % oc_bn
-            new_attrs['kernel_layout'] = 'OIHW%di%do' % (ic_bn, oc_bn)
+            new_attrs['kernel_layout'] = 'OIHW%do%di' % (oc_bn, ic_bn)
             new_data = tvm.placeholder((N, CI // ic_bn, H, W, ic_bn),
                                        dtype=data.dtype)
-            new_kernel = tvm.placeholder((CO // oc_bn, CI // ic_bn, KH, KW, ic_bn, oc_bn),
+            new_kernel = tvm.placeholder((CO // oc_bn, CI // ic_bn, KH, KW, oc_bn, ic_bn),
                                          dtype=kernel.dtype)
             new_workload = autotvm.task.args_to_workload(
                 [new_data, new_kernel, strides, padding, dilation, new_attrs[data_layout_key],
