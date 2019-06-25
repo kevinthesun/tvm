@@ -254,4 +254,10 @@ def schedule_conv2d_nchwc_cuda(cfg, s, conv):
                      cfg['auto_unroll_max_step'].val)
     s[output].pragma(kernel_scope, 'unroll_explicit', False)
 
+    N, CO_C, OH, OW, CO_B = get_const_tuple(packed_data.shape)
+    _, CI_C, KH, KW, _, CI_B = get_const_tuple(packed_kernel.shape)
+    CO = CO_C * CO_B
+    CI = CI_C * CI_B
+    cfg.add_flop(2 * N * OH * OW * CO * CI * KH * KW)
+
     return s
