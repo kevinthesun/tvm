@@ -64,14 +64,12 @@ parser = argparse.ArgumentParser(description='Search convolution workload.')
 parser.add_argument('--model', type=str, required=True,
                     help="Pretrained model from gluon model zoo.")
 parser.add_argument('--batch_size', type=int, required=True)
-parser.add_argument('--start', type=int, required=True)
-parser.add_argument('--end', type=int, required=True)
+parser.add_argument('--num_workers', type=int, required=True)
 
 args = parser.parse_args()
 mx_model = args.model
 bs = args.batch_size
-start = args.start
-end = args.end
+num_workers = args.num_workers
 
 def get_network(name, batch_size):
     """Get the symbol definition and random weight of a network"""
@@ -80,17 +78,17 @@ def get_network(name, batch_size):
 
     if "resnet" in name:
         n_layer = int(name.split('-')[1])
-        mod, params = relay.testing.resnet.get_workload(num_layers=n_layer, batch_size=batch_size, dtype=dtype)
+        net, params = relay.testing.resnet.get_workload(num_layers=n_layer, batch_size=batch_size, dtype=dtype)
     elif "vgg" in name:
         n_layer = int(name.split('-')[1])
-        mod, params = relay.testing.vgg.get_workload(num_layers=n_layer, batch_size=batch_size, dtype=dtype)
+        net, params = relay.testing.vgg.get_workload(num_layers=n_layer, batch_size=batch_size, dtype=dtype)
     elif name == 'mobilenet':
-        mod, params = relay.testing.mobilenet.get_workload(batch_size=batch_size, dtype=dtype)
+        net, params = relay.testing.mobilenet.get_workload(batch_size=batch_size, dtype=dtype)
     elif name == 'squeezenet_v1.1':
-        mod, params = relay.testing.squeezenet.get_workload(batch_size=batch_size, version='1.1', dtype=dtype)
+        net, params = relay.testing.squeezenet.get_workload(batch_size=batch_size, version='1.1', dtype=dtype)
     elif name == 'inception_v3':
         input_shape = (1, 3, 299, 299)
-        mod, params = relay.testing.inception_v3.get_workload(batch_size=batch_size, dtype=dtype)
+        net, params = relay.testing.inception_v3.get_workload(batch_size=batch_size, dtype=dtype)
     elif name == 'mxnet':
         # an example for mxnet model
         from mxnet.gluon.model_zoo.vision import get_model
@@ -126,7 +124,7 @@ def get_network(name, batch_size):
     else:
         raise ValueError("Unsupported network: " + name)
 
-    return mod, params, input_shape, output_shape
+    return net, params, input_shape, output_shape
 
 ###########################################
 # Set Tuning Options
@@ -207,7 +205,7 @@ def tune_tasks(tasks,
                 pass
 
     for i, tsk in enumerate(reversed(tasks)):
-        prefix = "[Task %d - %d %2d/%2d] " %(start, end, i+1, len(tasks))
+        prefix = "[Task %2d/%2d] " %(i+1, len(tasks))
 
         # create tuner
         if tuner == 'xgb' or tuner == 'xgb-rank':
@@ -250,165 +248,23 @@ def tune_and_evaluate(tuning_opt):
                                               params=params, ops=(relay.op.nn.conv2d, relay.op.nn.conv2d_transpose))
 
     # run tuning tasks
-    print("Tuning...")
-    tasks = [tasks[i] for i in range(start, end)]
-    tune_tasks(tasks, **tuning_opt)
-    return
+    end_idx = 0
+    tsk_slice = len(tasks) // num_workers
+    remain = len(tasks) % num_workers
+    final_cmd= ""
+    for i in range(num_workers):
+        start_idx = end_idx
+        end_idx = start_idx + tsk_slice
+        if remain > 0:
+            end_idx += 1
+            remain -= 1
+        end_idx = min(end_idx, len(tasks))
+        if end_idx > start_idx:
+            cmd = "CUDA_VISIBLE_DEVICES=%s python3 tune_relay_cuda.py --model %s --batch_size %d --start %d --end %d" \
+                  % (i, mx_model, bs, start_idx, end_idx)
+            final_cmd += cmd + " & "
 
-    # compile kernels with history best records
-    with autotvm.apply_history_best(log_file):
-        print("Compile...")
-        with relay.build_config(opt_level=3):
-            graph, lib, params = relay.build_module.build(
-                mod, target=target, params=params)
-
-        # export library
-        #tmp = tempdir()
-        #filename = "net.tar"
-        #lib.export_library(tmp.relpath(filename))
-
-        # load parameters
-        ctx = tvm.gpu(0)#context(str(target), 0)
-        module = runtime.create(graph, lib, ctx)
-        data_tvm = tvm.nd.array((np.random.uniform(size=input_shape)).astype(dtype))
-        module.set_input('data', data_tvm)
-        module.set_input(**params)
-
-        # evaluate
-        print("Evaluate inference time cost...")
-        ftimer = module.module.time_evaluator("run", ctx, number=1000, repeat=1)
-        prof_res = np.array(ftimer().results) * 1000  # convert to millisecond
-        print("Mean inference time (std dev): %.2f ms (%.2f ms)" %
-              (np.mean(prof_res), np.std(prof_res)))
-
-# We do not run the tuning in our webpage server since it takes too long.
-# Uncomment the following line to run it by yourself.
+    os.system(final_cmd[:-3])
 
 tune_and_evaluate(tuning_option)
 
-######################################################################
-# Sample Output
-# -------------
-# The tuning needs to compile many programs and extract feature from them.
-# So a high performance CPU is recommended. One sample output is listed below.
-# It takes about 4 hours to get the following output on a 32T AMD Ryzen Threadripper.
-# The tuning target is NVIDIA 1080 Ti.
-# (You can see some errors during compilation. If the tuning is not stuck, it is okay.)
-#
-# .. code-block:: bash
-#
-#    Extract tasks...
-#    Tuning...
-#    [Task  1/12]  Current/Best:  541.83/3570.66 GFLOPS | Progress: (960/2000) | 1001.31 s Done.
-#    [Task  2/12]  Current/Best:    0.56/ 803.33 GFLOPS | Progress: (704/2000) | 608.08 s Done.
-#    [Task  3/12]  Current/Best:  103.69/1141.25 GFLOPS | Progress: (768/2000) | 702.13 s Done.
-#    [Task  4/12]  Current/Best: 2905.03/3925.15 GFLOPS | Progress: (864/2000) | 745.94 sterminate called without an active exception
-#    [Task  4/12]  Current/Best: 2789.36/3925.15 GFLOPS | Progress: (1056/2000) | 929.40 s Done.
-#    [Task  5/12]  Current/Best:   89.06/1076.24 GFLOPS | Progress: (704/2000) | 601.73 s Done.
-#    [Task  6/12]  Current/Best:   40.39/2129.02 GFLOPS | Progress: (1088/2000) | 1125.76 s Done.
-#    [Task  7/12]  Current/Best: 4090.53/5007.02 GFLOPS | Progress: (800/2000) | 903.90 s Done.
-#    [Task  8/12]  Current/Best:    4.78/1272.28 GFLOPS | Progress: (768/2000) | 749.14 s Done.
-#    [Task  9/12]  Current/Best: 1391.45/2325.08 GFLOPS | Progress: (992/2000) | 1084.87 s Done.
-#    [Task 10/12]  Current/Best: 1995.44/2383.59 GFLOPS | Progress: (864/2000) | 862.60 s Done.
-#    [Task 11/12]  Current/Best: 4093.94/4899.80 GFLOPS | Progress: (224/2000) | 240.92 sterminate called without an active exception
-#    [Task 11/12]  Current/Best: 3487.98/4909.91 GFLOPS | Progress: (480/2000) | 534.96 sterminate called without an active exception
-#    [Task 11/12]  Current/Best: 4636.84/4912.17 GFLOPS | Progress: (1184/2000) | 1381.16 sterminate called without an active exception
-#    [Task 11/12]  Current/Best:   50.12/4912.17 GFLOPS | Progress: (1344/2000) | 1602.81 s Done.
-#    [Task 12/12]  Current/Best: 3581.31/4286.30 GFLOPS | Progress: (736/2000) | 943.52 s Done.
-#    Compile...
-#    Evaluate inference time cost...
-#    Mean inference time (std dev): 1.07 ms (0.05 ms)
-#
-# As a reference baseline, the time cost of MXNet + TensorRT on resnet-18 is 1.30ms. So we are a little faster.
-
-######################################################################
-#
-# .. note:: **Experiencing Difficulties?**
-#
-#   The auto tuning module is error-prone. If you always see " 0.00/ 0.00 GFLOPS",
-#   then there must be something wrong.
-#
-#   First, make sure you set the correct configuration of your device.
-#   Then, you can print debug information by adding these lines in the beginning
-#   of the script. It will print every measurement result, where you can find useful
-#   error messages.
-#
-#   .. code-block:: python
-#
-#      import logging
-#      logging.getLogger('autotvm').setLevel(logging.DEBUG)
-#
-#   Finally, always feel free to ask our community for help on https://discuss.tvm.ai
-
-
-#################################################################
-# Scale up measurement by using multiple devices
-# ----------------------------------------------
-#
-# If you have multiple devices, you can use all of them for measurement.
-# TVM uses the RPC Tracker to manage distributed devices.
-# The RPC Tracker is a centralized master node. We can register all devices to
-# the tracker. For example, if we have 10 GPU cards, we can register all of them
-# to the tracker, and run 10 measurements in parallel, accelerating the tuning process.
-#
-# To start an RPC tracker, run this command on the host machine. The tracker is
-# required during the whole tuning process, so we need to open a new terminal for
-# this command:
-#
-# .. code-block:: bash
-#
-#   python -m tvm.exec.rpc_tracker --host=0.0.0.0 --port=9190
-#
-# The expected output is
-#
-# .. code-block:: bash
-#
-#   INFO:RPCTracker:bind to 0.0.0.0:9190
-#
-# Then open another new terminal for the RPC server. We need to start one server
-# for each dedicated device. We use a string key to distinguish the types of devices.
-# You can pick a name you like.
-# (Note: For rocm backend, there are some internal errors with the compiler,
-# we need to add `--no-fork` to the argument list.)
-#
-# .. code-block:: bash
-#
-#     python -m tvm.exec.rpc_server --tracker=0.0.0.0:9190 --key=1080ti
-#
-# After registering devices, we can confirm it by querying rpc_tracker
-#
-# .. code-block:: bash
-#
-#   python -m tvm.exec.query_rpc_tracker --host=0.0.0.0 --port=9190
-#
-# For example, if we have four 1080ti, two titanx and one gfx900, the output can be
-#
-# .. code-block:: bash
-#
-#    Queue Status
-#    ----------------------------------
-#    key          total  free  pending
-#    ----------------------------------
-#    1080ti       4      4     0
-#    titanx       2      2     0
-#    gfx900       1      1     0
-#    ----------------------------------
-#
-# Finally, we need to change the tuning option to use RPCRunner. Use the code below
-# to replace the corresponding part above.
-
-tuning_option = {
-    'log_filename': log_file,
-
-    'tuner': 'xgb',
-    'n_trial': 2000,
-    'early_stopping': 600,
-
-    'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(timeout=10),
-        runner=autotvm.RPCRunner(
-            '1080ti',  # change the device key to your key
-            '0.0.0.0', 9190,
-            number=20, repeat=3, timeout=4, min_repeat_ms=150),
-    ),
-}
