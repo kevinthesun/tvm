@@ -194,9 +194,13 @@ def _generate_split_factor(num_filters):
 
 
 def _pack_data(cfg, data, kernel, pack_kernel=True):
+    n, _, ih, iw = get_const_tuple(data.shape)
     oc, ic, kh, kw = get_const_tuple(kernel.shape)
-    cfg.define_knob("tile_ic", _generate_split_factor(ic))
-    cfg.define_knob("tile_oc", _generate_split_factor(oc))
+
+    ic_space = _generate_split_factor(ic) if n == 1 else [4] if ic >= 4 else [ic]
+    oc_space = _generate_split_factor(oc) if n == 1 else [4] if oc >= 4 else [oc]
+    cfg.define_knob("tile_ic", ic_space)
+    cfg.define_knob("tile_oc", oc_space)
     ic_bn, oc_bn = cfg["tile_ic"].val, cfg["tile_oc"].val
 
     n, _, ih, iw = get_const_tuple(data.shape)
