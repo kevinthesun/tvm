@@ -227,8 +227,15 @@ def schedule_conv2d_nchwc_cuda(cfg, s, conv):
 
     # cooperative fetching
     for load in [AA, WW]:
+        tile_ic = cfg["tile_ic"].val
+        upper = 16
+        factor = upper
+        for i in range(tile_ic, 0, -1):
+            if i <= upper and tile_ic % i == 0:
+                factor = i
+                break
         c = s[load].op.axis[-1]
-        c_outer, c = s[load].split(c, factor=4)
+        c_outer, c = s[load].split(c, factor=factor)
         s[load].vectorize(c)
         fused = s[load].op.axis[:-1] + [c_outer]
         fused = s[load].fuse(*fused)
