@@ -51,6 +51,7 @@ from tvm import relay
 from tvm.autotvm.record import load_from_file
 import tvm.relay.testing
 from tvm.autotvm.tuner import XGBTuner, GATuner, RandomTuner, GridSearchTuner
+from tvm.autotvm.graph_tuner import DPTuner, PBQPTuner
 import tvm.contrib.graph_runtime as runtime
 
 #################################################################
@@ -139,6 +140,7 @@ target = tvm.target.cuda()
 #### TUNING OPTION ####
 network = 'mxnet'
 log_file = "conv2d_%s_%d.log" % (mx_model, bs)
+graph_opt_sch_file = "%s_%d_graph_opt.log" % (mx_model, bs)
 dtype = 'float32'
 
 tuning_option = {
@@ -238,6 +240,15 @@ def tune_tasks(tasks,
     #autotvm.record.pick_best(tmp_log_file, log_filename)
     #os.remove(tmp_log_file)
 
+# Use graph tuner to achieve graph level optimal schedules
+# Set use_DP=False if it takes too long to finish.
+def tune_graph(graph, dshape, records, opt_sch_file, use_DP=True):
+    target_op = [relay.nn.conv2d]
+    Tuner = DPTuner if use_DP else PBQPTuner
+    executor = Tuner(graph, {"data": dshape}, records, target_op, target)
+    executor.benchmark_layout_transform(min_exec_num=2000)
+    executor.run()
+    executor.write_opt_sch2record_file(opt_sch_file)
 
 ########################################################################
 # Finally, we launch tuning jobs and evaluate the end-to-end performance.
@@ -253,10 +264,11 @@ def tune_and_evaluate(tuning_opt):
     print("Tuning...")
     tasks = [tasks[i] for i in range(start, end)]
     tune_tasks(tasks, **tuning_opt)
+    tune_graph(net, input_shape, log_file, graph_opt_sch_file)
     return
 
     # compile kernels with history best records
-    with autotvm.apply_history_best(log_file):
+    with autotvm.apply_graph_best(graph_opt_sch_file):
         print("Compile...")
         with relay.build_config(opt_level=3):
             graph, lib, params = relay.build_module.build(
