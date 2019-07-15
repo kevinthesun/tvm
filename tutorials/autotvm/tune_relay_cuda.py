@@ -140,8 +140,15 @@ target = tvm.target.cuda()
 #### TUNING OPTION ####
 network = 'mxnet'
 log_file = "conv2d_%s_%d.log" % (mx_model, bs)
+tmp_log_file = "conv2d_%s_%d_%d_%d.log" % (mx_model, bs, start, end)
 graph_opt_sch_file = "%s_%d_graph_opt.log" % (mx_model, bs)
 dtype = 'float32'
+
+from tvm.autotvm.record import load_from_file
+wkl_set = set()
+if os.path.isfile(log_file):
+    for i, r in enumerate([i for i in load_from_file(log_file)]):
+        wkl_set.add(r[0].task.workload)
 
 tuning_option = {
     'log_filename': log_file,
@@ -209,6 +216,10 @@ def tune_tasks(tasks,
                 pass
 
     for i, tsk in enumerate(reversed(tasks)):
+        if tsk.workload in wkl_set:
+            print("%s already tuned. Skipped" % str(tsk.workload))
+            continue
+
         prefix = "[Task %d - %d %2d/%2d] " %(start, end, i+1, len(tasks))
 
         # create tuner
@@ -224,8 +235,8 @@ def tune_tasks(tasks,
             raise ValueError("Invalid tuner: " + tuner)
 
         if use_transfer_learning:
-            if os.path.isfile(log_file):
-                tuner_obj.load_history(autotvm.record.load_from_file(log_file))
+            if os.path.isfile(tmp_log_file):
+                tuner_obj.load_history(autotvm.record.load_from_file(tmp_log_file))
 
         # do tuning
         n_trial = min(n_trial, len(tsk.config_space))
@@ -234,7 +245,7 @@ def tune_tasks(tasks,
                        measure_option=measure_option,
                        callbacks=[
                            autotvm.callback.progress_bar(n_trial, prefix=prefix),
-                           autotvm.callback.log_to_file(log_file)])
+                           autotvm.callback.log_to_file(tmp_log_file)])
 
     # pick best records to a cache file
     #autotvm.record.pick_best(tmp_log_file, log_filename)
