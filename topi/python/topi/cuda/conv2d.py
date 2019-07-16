@@ -277,8 +277,8 @@ def _conv2d_direct_NCHWc(cfg, data, kernel, strides, padding, dilation, layout, 
     oc_chunk, ic_chunk, kh, kw, oc_bn, ic_bn = get_const_tuple(kernel.shape)
 
     n, _, ih, iw, _ = get_const_tuple(data.shape)
-    dilated_kernel_h = (kw - 1) * dh + 1
-    dilated_kernel_w = (kh - 1) * dw + 1
+    dilated_kernel_h = (kh - 1) * dh + 1
+    dilated_kernel_w = (kw - 1) * dw + 1
 
     # output shape
     out_height = (ih + 2 * HPAD - dilated_kernel_h) // HSTR + 1
