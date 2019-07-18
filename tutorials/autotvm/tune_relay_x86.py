@@ -189,7 +189,8 @@ def tune_and_evaluate(tuning_opt):
     # run tuning tasks
     print("Tuning...")
     tune_kernels(tasks, **tuning_opt)
-    tune_graph(mod["main"], data_shape, log_file, graph_opt_sch_file)
+    #tune_kernels(tasks, **tuning_opt)
+    tune_graph(net, data_shape, log_file, graph_opt_sch_file)
 
     # compile kernels with graph-level best records
     with autotvm.apply_graph_best(graph_opt_sch_file):

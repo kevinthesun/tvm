@@ -276,7 +276,6 @@ def tune_and_evaluate(tuning_opt):
     tasks = [tasks[i] for i in range(start, end)]
     tune_tasks(tasks, **tuning_opt)
     tune_graph(net, input_shape, log_file, graph_opt_sch_file)
-    return
 
     # compile kernels with history best records
     with autotvm.apply_graph_best(graph_opt_sch_file):
@@ -420,18 +419,3 @@ tune_and_evaluate(tuning_option)
 # Finally, we need to change the tuning option to use RPCRunner. Use the code below
 # to replace the corresponding part above.
 
-tuning_option = {
-    'log_filename': log_file,
-
-    'tuner': 'xgb',
-    'n_trial': 2000,
-    'early_stopping': 600,
-
-    'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(timeout=10),
-        runner=autotvm.RPCRunner(
-            '1080ti',  # change the device key to your key
-            '0.0.0.0', 9190,
-            number=20, repeat=3, timeout=4, min_repeat_ms=150),
-    ),
-}

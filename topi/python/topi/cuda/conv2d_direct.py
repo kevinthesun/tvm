@@ -121,7 +121,7 @@ def schedule_conv2d_nchwc_cuda(cfg, s, conv):
     """Schedule conv2d NCHWc template"""
     # tile and bind spatial axes
     n, f, y, x, c = s[conv].op.axis
-    cfg.define_split("tile_n", cfg.axis(n), num_outputs=4)
+    #cfg.define_split("tile_n", cfg.axis(n), num_outputs=4)
     cfg.define_split("tile_f", cfg.axis(f), num_outputs=4)
     cfg.define_split("tile_y", cfg.axis(y), num_outputs=4)
     cfg.define_split("tile_x", cfg.axis(x), num_outputs=4)

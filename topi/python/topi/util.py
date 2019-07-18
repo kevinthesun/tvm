@@ -156,7 +156,13 @@ def get_const_tuple(in_tuple):
     out_tuple : tuple of int
         The output.
     """
-    return tuple(get_const_int(elem) for elem in in_tuple)
+    ret = []
+    for elem in in_tuple:
+        if isinstance(elem, tvm.expr.Var):
+            ret.append(elem)
+        else:
+            ret.append(get_const_int(elem))
+    return ret
 
 
 def get_float_tuple(in_tuple):
