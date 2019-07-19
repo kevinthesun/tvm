@@ -104,7 +104,7 @@ bool Analyzer::CanProve(const Expr& expr) {
 }
 
 Expr Analyzer::Simplify(const Expr& expr) {
-  if (is_const(expr)) return expr;
+  if (is_const(expr) || expr.as<ir::Any>()) return expr;
   auto res = this->rewrite_simplify(expr);
   if (is_const(res)) return res;
   res = this->canonical_simplify(res);

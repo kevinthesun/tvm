@@ -23,7 +23,7 @@ from tvm.contrib import cudnn
 from ..nn.conv2d import conv2d_NCHWc, conv2d_alter_layout, conv2d_infer_layout
 from ..nn import conv2d, group_conv2d_nchw, conv2d_winograd_without_weight_transform
 from .. import nn, generic
-from ..util import get_const_tuple, traverse_inline
+from ..util import get_const_tuple, traverse_inline, get_dynamic_shape
 from ..nn.pad import pad
 
 from .conv2d_direct import schedule_direct_cuda, schedule_conv2d_nchwc_cuda
@@ -276,7 +276,8 @@ def _conv2d_direct_NCHWc(cfg, data, kernel, strides, padding, dilation, layout, 
 
     oc_chunk, ic_chunk, kh, kw, oc_bn, ic_bn = get_const_tuple(kernel.shape)
 
-    n, _, ih, iw, _ = get_const_tuple(data.shape)
+    dshape = get_const_tuple(data.shape)
+    n, _, ih, iw, _ = get_dynamic_shape(dshape)
     dilated_kernel_h = (kh - 1) * dh + 1
     dilated_kernel_w = (kw - 1) * dw + 1
 
@@ -401,6 +402,9 @@ def _alter_conv2d_layout(attrs, inputs, tinfos, F):
 
     data, kernel = tinfos[0:2]
     N, CI, H, W = get_const_tuple(data.shape)
+    if isinstance(N, tvm._ffi._ctypes.node.NodeBase):
+        # This is a hack.
+        N = 1#tvm.var("n")
     CO, _, KH, KW = get_const_tuple(kernel.shape)
 
     dispatch_ctx = autotvm.DispatchContext.current
@@ -408,8 +412,11 @@ def _alter_conv2d_layout(attrs, inputs, tinfos, F):
 
     if groups == 1:
         # query config of this workload
+        # This is hack again
+        data = tvm.placeholder((N, CI, H, W), dtype=data.dtype)
+        kernel = tvm.placeholder(kernel.shape, dtype=kernel.dtype)
         workload = autotvm.task.args_to_workload(
-            [tinfos[0], tinfos[1], strides, padding, dilation, layout, out_dtype], conv2d)
+            [data, kernel, strides, padding, dilation, layout, out_dtype], conv2d)
         cfg = autotvm.DispatchContext.current.query(target, workload)
 
         if cfg.is_fallback:  # if is fallback, clear query cache and return None

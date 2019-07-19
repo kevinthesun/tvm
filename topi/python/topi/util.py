@@ -158,10 +158,10 @@ def get_const_tuple(in_tuple):
     """
     ret = []
     for elem in in_tuple:
-        if isinstance(elem, tvm.expr.Var):
-            ret.append(elem)
-        else:
+        try:
             ret.append(get_const_int(elem))
+        except:
+            ret.append(elem)
     return ret
 
 
@@ -338,3 +338,14 @@ def get_shape(src_shape, src_layout, dst_layout):
         tvm.convert([i for i in range(len(src_layout))]))
 
     return get_const_tuple(tuple([src_shape[i.value] for i in dst_indices]))
+
+
+def get_dynamic_shape(shape, base_var_name="shape"):
+    ret = []
+    for i, s in enumerate(shape):
+        if not isinstance(s, (int, tvm.expr.Var)):
+            ret.append(tvm.var("%s_%d" % (base_var_name, i)))
+        else:
+            ret.append(s)
+    return tuple(ret)
+
