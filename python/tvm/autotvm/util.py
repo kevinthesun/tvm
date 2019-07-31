@@ -175,4 +175,10 @@ def get_const_tuple(in_tuple):
     out_tuple : tuple of int
         The output.
     """
-    return tuple(get_const_int(x) for x in in_tuple)
+    ret = []
+    for elem in in_tuple:
+        try:
+            ret.append(get_const_int(elem))
+        except:
+            ret.append(elem)
+    return tuple(ret)
