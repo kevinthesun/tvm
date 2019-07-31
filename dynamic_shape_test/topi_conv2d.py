@@ -1,11 +1,8 @@
 import numpy as np
-import nnvm
 import tvm
 import time
 import topi
 
-from nnvm import symbol as sym
-from nnvm.testing import utils
 from tvm.contrib import graph_runtime
 from tvm.autotvm.record import load_from_file
 

@@ -135,6 +135,38 @@ def conv2d_infer_layout(workload, cfg):
     """
     raise ValueError("missing register for topi.nn.conv2d_infer_layout")
 
+@tvm.target.generic_func
+def dispatch_symbolic_conv2d_workload(workload):
+    interval = 16
+    upper_limit = 64
+
+    shape_candidate = []
+    for i in range(upper_limit // interval):
+        shape_candidate.append(int((2 * i + 1) / 2 * interval))
+    shape_candidate.append(upper_limit)
+
+    data, kernel = workload[1], workload[2]
+    batch_size, in_channel, in_height, in_width = data[:-1]
+    out_channel, _, k_height, k_width = kernel[:-1]
+
+    if isinstance(in_channel, tvm.expr.Var) or isinstance(out_channel, tvm.expr.Var) \
+            or isinstance(k_height, tvm.expr.Var) or isinstance(k_width, tvm.expr.Var):
+        raise RuntimeError("Channel or kernel size cannot be symbolic.")
+
+    static_workloads = []
+    candidate_list = []
+    for axis in [batch_size, in_height, in_width]:
+        if isinstance(axis, tvm.expr.Var):
+            candidate_list.append(shape_candidate)
+        else:
+            candidate_list.append([axis])
+
+    from itertools import product
+    for bs, ih, iw in product(*candidate_list):
+        dt = (bs, in_channel, ih, iw) + (data[-1],)
+        static_workloads.append((workload[0], dt) + workload[2:])
+
+    return static_workloads
 
 
 def _get_workload(data, kernel, stride, padding, out_dtype, data_layout='NCHW'):

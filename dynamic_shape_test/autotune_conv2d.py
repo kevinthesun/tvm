@@ -8,9 +8,8 @@ from nnvm.testing import utils
 from tvm.contrib import graph_runtime
 from tvm import relay, autotvm
 
-run_times = 1000
 
-batch_size = relay.Any()
+batch_size = tvm.var("n")
 in_channel = 3
 out_channel = 64
 in_height = in_width = 224
@@ -32,34 +31,25 @@ out = relay.nn.conv2d(data, weight, channels=out_channel, strides=strides, kerne
                       padding=padding, dilation=dilation)
 #out = relay.nn.bias_add(out, bias, axis=1)
 net = relay.Function(relay.analysis.free_vars(out), out)
-
 params = {"weight": tvm.nd.array(np.random.uniform(0, 255, size=weight_shape).astype("float32"), ctx=tvm.cpu())}
 
+log_file = "conv2d.log"
 
-ctx = tvm.gpu()
-opt_level = 3
+tuning_option = {
+    'log_filename': log_file,
 
-#autotvm.GLOBAL_SCOPE.in_tuning = True
-tvm.autotvm.task.DispatchContext.current = tvm.autotvm.apply_history_best("single_sch")
-with relay.build_config(opt_level=opt_level):
-    graph, lib, params = relay.build_module.build(net, target=target,  params=params)
+    'tuner': 'xgb',
+    'n_trial': 2000,
+    'early_stopping': 1000,
 
-print(graph)
-#with nnvm.compiler.build_config(opt_level=opt_level):
-#    graph, lib, params = nnvm.compiler.build(net, target=target,  params=params, shape={"data": data_shape})
-
-"""
-module = graph_runtime.create(graph, lib, ctx)
-data_array = np.random.uniform(0, 255, size=data_shape).astype("float32")
-input_data = tvm.nd.array(data_array, ctx=ctx)
-module.set_input('data', input_data)
-module.set_input(**params)
-
-# Warmup
-for _ in range(10):
-    module.run()
-
-ftimer = module.module.time_evaluator("run", ctx, number=run_times, repeat=1)
-prof_res = np.array(ftimer().results) * 1000  # convert to millisecond
-print(np.mean(prof_res))
-"""
+    'measure_option': autotvm.measure_option(
+        builder=autotvm.LocalBuilder(timeout=10),
+        runner=autotvm.LocalRunner(number=10, repeat=1, timeout=20, min_repeat_ms=2000),
+        #runner=autotvm.RPCRunner(
+        #    '1080ti',  # change the device key to your key
+        #    '0.0.0.0', 9190,
+        #    number=20, repeat=3, timeout=4, min_repeat_ms=150)
+    ),
+    'try_winograd': True,
+    'use_transfer_learning': True
+}
