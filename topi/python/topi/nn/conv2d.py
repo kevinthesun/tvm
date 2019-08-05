@@ -140,12 +140,19 @@ def dispatch_symbolic_conv2d_workload(workload):
     interval = 16
     upper_limit = 64
 
-    shape_candidate = []
-    for i in range(upper_limit // interval):
-        shape_candidate.append(int((2 * i + 1) / 2 * interval))
-    shape_candidate.append(upper_limit)
+    def get_candidates(lower, upper):
+        shape_candidate = []
+        for i in range(upper // interval):
+            candidate = int((2 * i + 1) / 2 * interval)
+            if candidate < lower:
+                candidate = (candidate + (i + 1) * interval) // 2
+            if candidate < lower:
+                continue
+            shape_candidate.append(candidate)
+        shape_candidate.append(upper)
+        return shape_candidate
 
-    data, kernel = workload[1], workload[2]
+    data, kernel, padding = workload[1], workload[2], workload[4]
     batch_size, in_channel, in_height, in_width = data[:-1]
     out_channel, _, k_height, k_width = kernel[:-1]
 
@@ -155,11 +162,22 @@ def dispatch_symbolic_conv2d_workload(workload):
 
     static_workloads = []
     candidate_list = []
-    for axis in [batch_size, in_height, in_width]:
-        if isinstance(axis, tvm.expr.Var):
-            candidate_list.append(shape_candidate)
-        else:
-            candidate_list.append([axis])
+    if isinstance(batch_size, tvm.expr.Var):
+        candidate_list.append(get_candidates(1, upper_limit))
+    else:
+        candidate_list.append([batch_size])
+
+    if isinstance(in_height, tvm.expr.Var):
+        lower_limit = k_height - 2 * padding[0]
+        candidate_list.append(get_candidates(lower_limit, upper_limit))
+    else:
+        candidate_list.append([in_height])
+
+    if isinstance(in_width, tvm.expr.Var):
+        lower_limit = k_width - 2 * padding[1]
+        candidate_list.append(get_candidates(lower_limit, upper_limit))
+    else:
+        candidate_list.append([in_width])   
 
     from itertools import product
     for bs, ih, iw in product(*candidate_list):
