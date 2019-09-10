@@ -895,3 +895,7 @@ def group_conv2d_nchw(Input, Filter, stride, padding, dilation, groups, out_dtyp
                  xx * stride_w + rx * dilation_w].astype(out_dtype) *
             Filter[ff, rc, ry, rx].astype(out_dtype),
             axis=[rc, ry, rx]), tag='group_conv2d_nchw')
+
+@tvm.target.generic_func
+def dispatch_symbolic_conv2d(input_shape):
+    raise RuntimeError("Not implemented.")

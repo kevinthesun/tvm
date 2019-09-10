@@ -201,11 +201,11 @@ def _declaration_conv_impl(cfg, data, kernel, strides, padding, dilation, layout
     kw = tvm.reduce_axis((0, kernel_width), name='kw')
 
     conv = tvm.compute(oshape, lambda n, oc_chunk, oh, ow, oc_block:
-                       tvm.sum(data_vec[n, ic//ic_bn, oh*HSTR+kh*dilation_h, ic%ic_bn,
-                                        ow*WSTR+kw*dilation_w].astype(out_dtype) *
-                               kernel_vec[oc_chunk, ic//ic_bn, kh, kw, ic%ic_bn,
-                                          oc_block].astype(out_dtype),
-                               axis=[ic, kh, kw]), name='conv')
+    tvm.sum(data_vec[n, ic//ic_bn, oh*HSTR+kh*dilation_h, ic%ic_bn,
+                     ow*WSTR+kw*dilation_w].astype(out_dtype) *
+            kernel_vec[oc_chunk, ic//ic_bn, kh, kw, ic%ic_bn,
+                       oc_block].astype(out_dtype),
+            axis=[ic, kh, kw]), name='conv')
 
     unpack = tvm.compute(unpack_shape,
                          lambda n, c, h, w: conv[n, c // oc_bn, h, w, c % oc_bn]
@@ -503,7 +503,7 @@ def _declaration_conv_NCHWc(cfg, data, kernel, strides,
     n, ic_chunk, ih, iw, ic_bn = get_const_tuple(data.shape)
     in_channel = ic_chunk * ic_bn
     oc_chunk, ic_chunk_group, kernel_height, kernel_width, _, oc_bn = \
-            get_const_tuple(kernel.shape)
+        get_const_tuple(kernel.shape)
     num_filter = oc_chunk * oc_bn
 
     # If no config was set, we can fallback to NCHW config.

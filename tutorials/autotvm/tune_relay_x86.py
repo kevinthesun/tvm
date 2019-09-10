@@ -32,6 +32,15 @@ from tvm.relay import testing
 from tvm.autotvm.tuner import XGBTuner, GATuner, RandomTuner, GridSearchTuner
 from tvm.autotvm.graph_tuner import DPTuner, PBQPTuner
 import tvm.contrib.graph_runtime as runtime
+import tvm.contrib.debugger.debug_runtime as debug_runtime
+
+import argparse
+parser = argparse.ArgumentParser(description='Search convolution workload.')
+parser.add_argument('--model', type=str, required=True,
+                    help="Pretrained model from gluon model zoo.")
+
+args = parser.parse_args()
+mx_model = args.model
 
 #################################################################
 # Define network
@@ -68,6 +77,11 @@ def get_network(name, batch_size):
         net = mod["main"]
         net = relay.Function(net.params, relay.nn.softmax(net.body), None, net.type_params, net.attrs)
         mod = relay.Module.from_expr(net)
+    elif name == "gluoncv":
+        from gluoncv import model_zoo
+        input_shape = (batch_size, 3, 512, 512)
+        block = model_zoo.get_model(mx_model, pretrained=True)
+        mod, params = relay.frontend.from_mxnet(block, shape={'data': input_shape}, dtype=dtype)
     else:
         raise ValueError("Unsupported network: " + name)
 
@@ -78,13 +92,13 @@ def get_network(name, batch_size):
 # Platinum 8000 series, the target should be "llvm -mcpu=skylake-avx512".
 # For AWS EC2 c4 instance with Intel Xeon E5-2666 v3, it should be
 # "llvm -mcpu=core-avx2".
-target = "llvm"
+target = "llvm -mcpu=skylake-avx512"
 
 batch_size = 1
 dtype = "float32"
-model_name = "resnet-18"
-log_file = "%s.log" % model_name
-graph_opt_sch_file = "%s_graph_opt.log" % model_name
+model_name = "gluoncv"
+log_file = "%s.log" % mxnet_model
+graph_opt_sch_file = "%s_graph_opt.log" % mx_model
 
 # Set the input name of the graph
 # For ONNX models, it is typically "0".
@@ -92,8 +106,14 @@ input_name = "data"
 
 # Set number of threads used for tuning based on the number of
 # physical CPU cores on your machine.
-num_threads = 1
+num_threads = 18
 os.environ["TVM_NUM_THREADS"] = str(num_threads)
+
+from tvm.autotvm.record import load_from_file
+wkl_set = set()
+if os.path.isfile(log_file):
+    for i, r in enumerate([i for i in load_from_file(log_file)]):
+        wkl_set.add(r[0].task.workload)
 
 
 #################################################################
@@ -117,7 +137,8 @@ tuning_option = {
     'measure_option': autotvm.measure_option(
         builder=autotvm.LocalBuilder(),
         runner=autotvm.LocalRunner(number=10, repeat=1,
-                                   min_repeat_ms=1000),
+                                   timeout=20,
+                                   min_repeat_ms=2000),
     ),
 }
 
@@ -129,6 +150,9 @@ def tune_kernels(tasks,
                  log_filename='tuning.log'):
 
     for i, tsk in enumerate(tasks):
+        if tsk.workload in wkl_set:
+            print("%s already tuned. Skipped" % str(tsk.workload))
+            continue
         prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
 
         # converting conv2d tasks to conv2d_NCHWc tasks
@@ -167,7 +191,7 @@ def tune_kernels(tasks,
 
 # Use graph tuner to achieve graph level optimal schedules
 # Set use_DP=False if it takes too long to finish.
-def tune_graph(graph, dshape, records, opt_sch_file, use_DP=True):
+def tune_graph(graph, dshape, records, opt_sch_file, use_DP=False):
     target_op = [relay.nn.conv2d]
     Tuner = DPTuner if use_DP else PBQPTuner
     executor = Tuner(graph, {input_name: dshape}, records, target_op, target)
@@ -188,9 +212,8 @@ def tune_and_evaluate(tuning_opt):
 
     # run tuning tasks
     print("Tuning...")
-    tune_kernels(tasks, **tuning_opt)
     #tune_kernels(tasks, **tuning_opt)
-    tune_graph(net, data_shape, log_file, graph_opt_sch_file)
+    tune_graph(net, data_shape, log_file, graph_opt_sch_file, use_DP=False)
 
     # compile kernels with graph-level best records
     with autotvm.apply_graph_best(graph_opt_sch_file):
@@ -202,21 +225,22 @@ def tune_and_evaluate(tuning_opt):
         # upload parameters to device
         ctx = tvm.cpu()
         data_tvm = tvm.nd.array((np.random.uniform(size=data_shape)).astype(dtype))
-        module = runtime.create(graph, lib, ctx)
+        module = debug_runtime.create(graph, lib, ctx)
         module.set_input(input_name, data_tvm)
         module.set_input(**params)
+        module.run_individual(100)
 
         # evaluate
         print("Evaluate inference time cost...")
-        ftimer = module.module.time_evaluator("run", ctx, number=100, repeat=3)
-        prof_res = np.array(ftimer().results) * 1000  # convert to millisecond
-        print("Mean inference time (std dev): %.2f ms (%.2f ms)" %
-              (np.mean(prof_res), np.std(prof_res)))
+        #ftimer = module.module.time_evaluator("run", ctx, number=100, repeat=3)
+        #prof_res = np.array(ftimer().results) * 1000  # convert to millisecond
+        #print("Mean inference time (std dev): %.2f ms (%.2f ms)" %
+        #      (np.mean(prof_res), np.std(prof_res)))
 
 # We do not run the tuning in our webpage server since it takes too long.
 # Uncomment the following line to run it by yourself.
 
-# tune_and_evaluate(tuning_option)
+tune_and_evaluate(tuning_option)
 
 ######################################################################
 # Sample Output
@@ -244,3 +268,4 @@ def tune_and_evaluate(tuning_opt):
 #    Compile...
 #    Evaluate inference time cost...
 #    Mean inference time (std dev): 3.16 ms (0.03 ms)
+
