@@ -472,10 +472,14 @@ class ApplyGraphBest(DispatchContext):
             The specific configuration.
         """
         if self._counter < len(self._records):
-            cfg = self._records[self._counter][0].config
-            self._counter += 1
-            self.update(target, workload, cfg)
-            return cfg
+            wkl = self._records[self._counter][0].task.workload
+            op_name = wkl[0]
+            current_op_name = workload[0]
+            if op_name == current_op_name:
+                cfg = self._records[self._counter][0].config
+                self._counter += 1
+                self.update(target, workload, cfg)
+                return cfg
         key = (str(target), workload)
         if key not in self._global_cfg_dict:
             msg = "Config for target=%s, workload=%s is missing in ApplyGraphBest context. " \
