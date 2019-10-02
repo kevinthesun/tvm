@@ -17,7 +17,7 @@
 """Backend compiler related feature registration"""
 # pylint: disable=invalid-name,unused-argument, len-as-condition
 from __future__ import absolute_import
-from topi.util import get_const_int, get_const_tuple
+from topi.util import get_const_int, get_const_tuple, get_shape
 from . import op as _reg
 from ._reduce import _schedule_reduce
 from .op import OpPattern
@@ -204,3 +204,107 @@ def take_shape_func(attrs, inputs, out_ndims):
             axis += data_ndim
         assert 0 <= axis < data_ndim
         return [_take_with_axis_shape_func(*inputs, convert(axis), out_ndims[0])]
+
+@script
+def _layout_transform_shape_func(data_shape,
+                                 out_layout_len,
+                                 dst_equal_list,
+                                 dst_mul_list,
+                                 dst_div_list,
+                                 dst_mix_list):
+    out = output_tensor((out_layout_len,), "int64")
+    for i in const_range(len(dst_equal_list)):
+        out[dst_equal_list[i][0]] = data_shape[dst_equal_list[i][1]]
+    for i in const_range(len(dst_mul_list)):
+        out[dst_mul_list[i][0]] = data_shape[dst_mul_list[i][1]] * data_shape[dst_mul_list[i][2]]
+    for i in const_range(len(dst_div_list)):
+        out[dst_div_list[i][0]] = data_shape[dst_div_list[i][1]] // dst_div_list[i][3]
+        out[dst_div_list[i][2]] = int64(dst_div_list[i][3])
+    for i in const_range(len(dst_mix_list)):
+        out[dst_mix_list[i][0]] = data_shape[dst_mix_list[i][1]] * dst_mix_list[i][2] // dst_mix_list[i][4]
+        out[dst_mix_list[i][3]] = int64(dst_mix_list[i][4])
+
+    return out
+
+@_reg.register_shape_func("layout_transform", False)
+def layout_transform_shape_func(attrs, inputs, _):
+    def _fetch_axis(layout):
+        major_axes = []
+        minor_axes = {}
+        num_start = -1
+        for i, item in enumerate(layout):
+            if "A" <= item <= "Z":
+                major_axes.append(item)
+            elif "a" <= item <= "z":
+                last_num = int(layout[num_start:i])
+                minor_axes[item] = last_num
+                num_start = -1
+            elif num_start < 0:
+                num_start = i
+        return major_axes, minor_axes
+
+    src_major_axes, src_minor_axes = _fetch_axis(attrs.src_layout)
+    dst_major_axes, dst_minor_axes = _fetch_axis(attrs.dst_layout)
+    src_letter_list = []
+    dst_letter_list = []
+    for item in attrs.src_layout:
+        if "A" <= item <= "Z" or "a" <= item <= "z":
+            src_letter_list.append(item)
+    for item in attrs.dst_layout:
+        if "A" <= item <= "Z" or "a" <= item <= "z":
+            dst_letter_list.append(item)
+    out_layout_len = len(dst_major_axes) + len(dst_minor_axes)
+    dst_equal_list = []
+    dst_mul_list = []
+    dst_div_list = []
+    dst_mix_list = []
+
+    for key in dst_major_axes:
+        if key.lower() not in dst_minor_axes:
+            if key.lower() not in src_minor_axes:
+                dst_equal_list.append((dst_letter_list.index(key),
+                                       src_letter_list.index(key)))
+            else:
+                dst_mul_list.append((dst_letter_list.index(key),
+                                     src_letter_list.index(key),
+                                     src_letter_list.index(key.lower())))
+        else:
+            if key.lower() not in src_minor_axes:
+                dst_div_list.append((dst_letter_list.index(key),
+                                     src_letter_list.index(key),
+                                     dst_letter_list.index(key.lower()),
+                                     dst_minor_axes[key.lower()]))
+            else:
+                dst_mix_list.append((dst_letter_list.index(key),
+                                     src_letter_list.index(key),
+                                     src_minor_axes[key.lower()],
+                                     dst_letter_list.index(key.lower()),
+                                     dst_minor_axes[key.lower()]))
+
+    return [_layout_transform_shape_func(inputs[0],
+                                         convert(out_layout_len),
+                                         convert(dst_equal_list),
+                                         convert(dst_mul_list),
+                                         convert(dst_div_list),
+                                         convert(dst_mix_list))]
+
+@script
+def _expand_dim_shape_func(data_shape, axis, num_newaxis):
+    out = output_tensor((data_shape.shape[0] + num_newaxis,), "int64")
+    for i in const_range(out.shape[0]):
+        if i < axis:
+            out[i] = int64(1)
+        elif axis <= i < axis + num_newaxis:
+            out[i] = data_shape[i]
+        else:
+            out[i] = data_shape[i - num_newaxis]
+
+    return out
+
+@_reg.register_shape_func("expand_dims", False)
+def expand_dim_shape_func(attrs, inputs, _):
+    axis = get_const_int(attrs.axis)
+    num_newaxis = get_const_int(attrs.num_newaxis)
+    if axis < 0:
+        axis = inputs[0].shape[0] + axis + 1
+    return [_expand_dim_shape_func(inputs[0], convert(axis), convert(num_newaxis))]

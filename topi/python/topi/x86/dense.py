@@ -36,7 +36,7 @@ def _declaration_dense(cfg, data, weight, bias=None, out_dtype=None):
                             tag=tag.BROADCAST)
         return C
 
-    M, _ = get_const_tuple(data.shape)
+    M, _ = get_const_tuple(data.shape, False)
     # For small batch sizes, don't pack weight into cache-friendly layout
     # because of overhead in packing and limited reuse from batch dimension
     # TODO(icemelon9): use a more systematic way to determine which schedule to use
@@ -53,11 +53,15 @@ def _declaration_dense_pack(cfg, data, weight, bias=None, out_dtype=None):
     M, K = get_const_tuple(data.shape) # batch, in_dim
     N, _ = get_const_tuple(weight.shape) # out_dim
     # create tuning space
-    cfg.define_split("tile_y", M, num_outputs=3)
+    #Hack here!
+    actual_M = -1
+    if not isinstance(M, int):
+        actual_M = 1
+    cfg.define_split("tile_y", actual_M, num_outputs=3)
     cfg.define_split("tile_x", N, num_outputs=3)
     cfg.define_split("tile_k", K, num_outputs=2)
     if cfg.is_fallback:
-        _default_dense_pack_config(cfg, M, N, K)
+        _default_dense_pack_config(cfg, actual_M, N, K)
 
     packw_bn = cfg["tile_x"].size[-1]
     packw_shape = (N // packw_bn, K, packw_bn)
@@ -85,11 +89,15 @@ def _declaration_dense_nopack(cfg, data, weight, bias=None, out_dtype=None):
     M, K = get_const_tuple(data.shape)
     N, _ = get_const_tuple(weight.shape)
     # create tuning space
-    cfg.define_split("tile_y", M, num_outputs=2)
+    #Hack here!
+    actual_M = -1
+    if not isinstance(M, int):
+        actual_M = 1
+    cfg.define_split("tile_y", actual_M, num_outputs=2)
     cfg.define_split("tile_x", N, num_outputs=2)
     cfg.define_split("tile_k", K, num_outputs=2)
     if cfg.is_fallback:
-        _default_dense_nopack_config(cfg, M, N, K)
+        _default_dense_nopack_config(cfg, actual_M, N, K)
 
     vec = cfg["tile_k"].size[-1]
     k = tvm.reduce_axis((0, K // vec), "k")

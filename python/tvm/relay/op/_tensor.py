@@ -139,6 +139,9 @@ def _broadcast_shape_func(x, y, ndim):
 def broadcast_shape_func(attrs, inputs, out_ndims):
     return [_broadcast_shape_func(*inputs, out_ndims[0])]
 
+def elemwise_shape_func(attrs, inputs, out_ndims):
+    return inputs
+
 register_shape_func("add", False, broadcast_shape_func)
 register_shape_func("subtract", False, broadcast_shape_func)
 register_shape_func("multiply", False, broadcast_shape_func)
@@ -152,3 +155,6 @@ register_shape_func("less", False, broadcast_shape_func)
 register_shape_func("less_equal", False, broadcast_shape_func)
 register_shape_func("greater", False, broadcast_shape_func)
 register_shape_func("greater_equal", False, broadcast_shape_func)
+
+register_shape_func("sqrt", False, elemwise_shape_func)
+register_shape_func("negative", False, elemwise_shape_func)

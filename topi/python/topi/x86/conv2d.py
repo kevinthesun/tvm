@@ -352,7 +352,6 @@ def _topi_nn_conv2d_NCHWc(*args, **kwargs):
     s = _schedule_conv2d_NCHWc(cfg, [C])
     return s, [new_data, new_kernel, C]
 
-
 @conv2d_alter_layout.register("cpu")
 def _alter_conv2d_layout(attrs, inputs, tinfo, F):
 
@@ -364,7 +363,7 @@ def _alter_conv2d_layout(attrs, inputs, tinfo, F):
         new_attrs["channels"] = inputs[1].checked_type.shape[attrs['kernel_layout'].index('O')]
 
     data, kernel = tinfo[0], tinfo[1]
-    batch_size, in_channel, height, width = get_const_tuple(data.shape)
+    batch_size, in_channel, height, width = get_const_tuple(data.shape, False)
 
     groups = attrs.get_int("groups")
     out_channel = attrs.get_int("channels") \

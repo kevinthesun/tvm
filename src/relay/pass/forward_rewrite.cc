@@ -149,6 +149,10 @@ class ForwardRewriter : private ExprMutator {
 
   Expr VisitExpr_(const CallNode* call_node) final {
     const Call& ref_call = GetRef<Call>(call_node);
+    if (ref_call->op->is_type<GlobalVarNode>()) {
+      return CallNode::make(ref_call->op, ref_call->args,
+                            ref_call->attrs);
+    }
     PackedFunc frewrite;
     if (rewrite_func_) {
       frewrite = *rewrite_func_;

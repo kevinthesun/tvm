@@ -292,12 +292,14 @@ inline Array<Expr> TransformShape(const Array<Expr>& src_shape,
     Expr orig_shape = src_shape[i];
     IterVar orig_axis = src_axis[i];
     if (!LayoutAxis::Get(orig_axis).IsPrimal()) {
+      const auto* orig_shape_const = orig_shape.as<IntImm>();
       if (orig_shape.defined()) {
-        const auto* orig_shape_const = orig_shape.as<IntImm>();
         const auto* orig_axis_extent = orig_axis->dom->extent.as<IntImm>();
-        CHECK_EQ(orig_shape_const->value, orig_axis_extent->value)
-          << "Input shape mismatch at index " << i << ". Expected "
-          << orig_axis->dom->extent << ", get " << orig_shape;
+        if (orig_shape_const) {
+          CHECK_EQ(orig_shape_const->value, orig_axis_extent->value)
+            << "Input shape mismatch at index " << i << ". Expected "
+            << orig_axis->dom->extent << ", get " << orig_shape;
+        }
       }
       bind_map[orig_axis->var.get()] = Expr(0);
     } else {

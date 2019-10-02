@@ -180,5 +180,5 @@ def get_const_tuple(in_tuple):
         try:
             ret.append(get_const_int(elem))
         except:
-            ret.append(elem)
+            ret.append(-1)
     return tuple(ret)

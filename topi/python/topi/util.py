@@ -143,7 +143,7 @@ def equal_const_int(expr, value):
     return expr.value == value
 
 
-def get_const_tuple(in_tuple):
+def get_const_tuple(in_tuple, keep_origin=True):
     """Verifies input tuple is IntImm, returns tuple of int.
 
     Parameters
@@ -161,7 +161,7 @@ def get_const_tuple(in_tuple):
         try:
             ret.append(get_const_int(elem))
         except:
-            ret.append(elem)
+            ret.append(elem if keep_origin else -1)
     return ret
 
 
@@ -330,14 +330,14 @@ def get_shape(src_shape, src_layout, dst_layout):
     if isinstance(dst_layout, str):
         dst_layout = layout(dst_layout)
 
-    assert len(src_layout) == len(dst_layout), \
-        "Incompatible layout %s vs %s" % (src_layout, dst_layout)
+    #assert len(src_layout) == len(dst_layout), \
+    #    "Incompatible layout %s vs %s" % (src_layout, dst_layout)
 
     layout_mapping = bijective_layout(src_layout, dst_layout)
-    dst_indices = layout_mapping.forward_index(
-        tvm.convert([i for i in range(len(src_layout))]))
+    #dst_indices = layout_mapping.forward_index(
+    #    tvm.convert([i for i in range(len(src_layout))]))
 
-    return get_const_tuple(tuple([src_shape[i.value] for i in dst_indices]))
+    return layout_mapping.forward_shape(src_shape)
 
 
 def get_dynamic_shape(shape, base_var_name="shape"):

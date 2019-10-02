@@ -699,7 +699,7 @@ Object VirtualMachine::Invoke(const VMFunction& func, const std::vector<Object>&
   InvokeGlobal(func, args);
   RunLoop();
   auto alloc = MemoryManager::Global()->GetAllocator(ctxs[0]);
-  DLOG(INFO) << "Memory used: " << alloc->UsedMemory() << " B";
+  LOG(INFO) << "Memory used: " << alloc->UsedMemory() << " B";
   return return_register;
 }
 
@@ -789,7 +789,6 @@ void VirtualMachine::RunLoop() {
   while (true) {
   main_loop:
     auto const& instr = this->code[this->pc];
-    DLOG(INFO) << "Executing(" << pc << "): " << instr;
 #if USE_RELAY_DEBUG
     InstructionPrint(std::cout, instr);
 #endif  // USE_RELAY_DEBUG

@@ -21,12 +21,31 @@ The Relay Virtual Machine.
 Implements a Python interface to compiling and executing on the Relay VM.
 """
 import numpy as np
+from enum import Enum
 
 import tvm
 from tvm._ffi.runtime_ctypes import TVMByteArray
 from . import _vm
 from . import vmobj as _obj
 from .interpreter import Executor
+from ..op import shape_of, take, all
+from ..expr import Var, Constant, Function, GlobalVar, If, const
+from ..analysis import free_vars
+
+
+class DispatchType(Enum):
+    NONE = 0
+    GRAPH = 1
+    KERNEL = 2
+
+class DispatchFuncMode(Enum):
+    UNIFORM = 0
+    LOG = 1
+    CUSTOM = 2
+
+uniform_stride = 16
+symbolic_axis_upper_limit = 256
+num_global_func_name = 0
 
 
 def _update_target(target):
@@ -66,6 +85,50 @@ def convert(args):
 
     return cargs
 
+def _uniform_dispatcher(input_shape):
+    buckets = []
+    bucket = []
+
+    for i in range(symbolic_axis_upper_limit // uniform_stride):
+        low = 1 + i * uniform_stride
+        high = low + uniform_stride
+        bucket.append((low, high))
+    bucket.append((min(bucket[-1][1], symbolic_axis_upper_limit), None))
+
+    for input_name, shape in input_shape.items():
+        num_sym_axes = 0
+        for axis in shape:
+            if not isinstance(axis, int):
+                num_sym_axes += 1
+        full_bucket = [input_name] + [bucket] * num_sym_axes
+        buckets.append(full_bucket)
+
+    return buckets
+
+def _log_dispatcher(input_shape):
+    buckets = []
+    bucket = []
+    factor = 1
+
+    for _ in range(symbolic_axis_upper_limit):
+        next_factor = factor * 2
+        if next_factor >= symbolic_axis_upper_limit:
+            bucket.append((factor, symbolic_axis_upper_limit))
+            break
+        else:
+            bucket.append((factor, next_factor))
+            factor = next_factor
+    bucket.append((min(bucket[-1][1], symbolic_axis_upper_limit), None))
+
+    for input_name, shape in input_shape.items():
+        num_sym_axes = 0
+        for axis in shape:
+            if not isinstance(axis, int):
+                num_sym_axes += 1
+        full_bucket = [input_name] + [bucket] * num_sym_axes
+        buckets.append(full_bucket)
+
+    return buckets
 
 class VirtualMachine(object):
     """Relay VM runtime."""
@@ -150,7 +213,14 @@ class VMCompiler(object):
         self._compile = self.mod["compile"]
         self._get_vm = self.mod["get_vm"]
 
-    def compile(self, mod, target=None, target_host=None):
+    def compile(self,
+                mod,
+                target=None,
+                target_host=None,
+                input_shape=None,
+                dispatch_type=DispatchType.NONE.value,
+                dispatch_func_mode=DispatchFuncMode.UNIFORM.value,
+                custom_dispatch_func=None):
         """
         Parameters
         ----------
@@ -176,6 +246,82 @@ class VMCompiler(object):
         vm : VirtualMachine
             The VM runtime.
         """
+        # Dynamic shape dispatching
+        if dispatch_type == DispatchType.GRAPH.value:
+            if dispatch_func_mode == DispatchFuncMode.UNIFORM.value:
+                buckets = _uniform_dispatcher(input_shape)
+            elif dispatch_func_mode == DispatchFuncMode.LOG.value:
+                buckets = _log_dispatcher(input_shape)
+            else:
+                assert custom_dispatch_func, "Customized function needs to be provided."
+                buckets = custom_dispatch_func(input_shape)
+
+            old_main = mod["main"]
+            params = free_vars(old_main.body)
+            input_list = []
+            iname_list = []
+            for param in params:
+                if param.name_hint in input_shape:
+                    input_list.append(param)
+                    iname_list.append(param.name_hint)
+
+            cond_list = []
+            for i, input_var in enumerate(input_list):
+                iname = iname_list[i]
+                ishape = input_shape[iname]
+                dshape = shape_of(input_var)
+                bucket_list = None
+                for item in buckets:
+                    if item[0] == iname:
+                        bucket_list = item[1:]
+                        break
+                num_sym_axis = 0
+                for j, axis in enumerate(ishape):
+                    if not isinstance(axis, int):
+                        dim_val = take(dshape, Constant(tvm.nd.array([j])))
+                        cond_list.append([])
+                        for interval in bucket_list[num_sym_axis]:
+                            low, high = interval
+                            if high:
+                                cond = all(const(low) <= dim_val < const(high))
+                            else:
+                                cond = all(dim_val >= const(low))
+                            cond_list[-1].append(cond)
+                        num_sym_axis += 1
+
+
+            def _build_dispatch_tree(conditions, level, pos):
+                if level == len(conditions) - 1:
+                    # Build leaf node
+                    global num_global_func_name
+                    global_var = GlobalVar("copied_func_%d" % num_global_func_name)
+                    num_global_func_name += 1
+                    mod[global_var] = Function(free_vars(old_main.body),
+                                               old_main.body,
+                                               None,
+                                               old_main.type_params,
+                                               old_main.attrs)
+
+                    if pos == len(conditions[level]) - 1:
+                        return global_var(*params)
+                    else:
+                        return If(conditions[level][pos], global_var(*params),
+                                  _build_dispatch_tree(conditions, level, pos + 1))
+                else:
+                    if pos == len(conditions[level]) - 1:
+                        return _build_dispatch_tree(conditions, level + 1, 0)
+                    else:
+                        return If(conditions[level][pos],
+                                  _build_dispatch_tree(conditions, level + 1, 0),
+                                  _build_dispatch_tree(conditions, level, pos + 1))
+
+            dispatch_out = _build_dispatch_tree(cond_list, 0, 0)
+            mod["main"] = Function(free_vars(dispatch_out), dispatch_out)
+
+
+        elif dispatch_type == DispatchType.KERNEL.value:
+            raise RuntimeError("Kernel dispatching mode not supported yet.")
+
         target = _update_target(target)
         target_host = None if target_host == "" else target_host
         if not target_host:
