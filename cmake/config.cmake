@@ -147,6 +147,10 @@ set(USE_SORT ON)
 # /path/to/tensorrt that contains include and lib dirs
 set(USE_TENSORRT OFF)
 # Build ANTLR parser for Relay text format
+# Possible values:
+# - ON: enable ANTLR by searching default locations (cmake find_program for antlr4 and /usr/local for jar)
+# - OFF: disable ANTLR
+# - /path/to/antlr-*-complete.jar: path to specific ANTLR jar file
 set(USE_ANTLR OFF)
 
 # Whether use Relay debug mode
