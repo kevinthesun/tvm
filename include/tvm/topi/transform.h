@@ -30,6 +30,7 @@
 #include <tvm/topi/detail/ravel_unravel.h>
 #include <tvm/topi/detail/tensor_utils.h>
 #include <tvm/topi/tags.h>
+#include <tvm/topi/broadcast.h>
 
 #include <algorithm>
 #include <iterator>
@@ -1509,6 +1510,74 @@ inline Tensor sparse_to_dense(const Tensor& sparse_indices, const Array<Integer>
         return ret;
       },
       name, tag);
+}
+
+/*!
+ * \brief Numpy style advanced indexing with tensor.
+ * \param data is input data.
+ * \param indices is list of indexing tensors.
+ * \return Output tensor.
+ */
+inline Tensor adv_index(const Tensor& data, const Array<Tensor>& indices,
+                        const std::string name = "advanced_index",
+                        const std::string tag = kInjective) {
+  Array<PrimExpr> oshape;
+  Array<PrimExpr> broadcast_shape;
+  std::vector<int64_t> flatten_shape_lens;
+  int64_t num_picked_elems = 1;
+
+  for (const auto& index : indices) {
+    int64_t flatten_len = 1;
+    for (const auto& dim : index->shape) {
+      const IntImmNode* axis_len = dim.as<IntImmNode>();
+      if (!axis_len) {
+        LOG(FATAL) << "Dynamic shape indexing tensor is not allowed in advanced index.";
+      }
+      flatten_len *= axis_len->value;
+    }
+    flatten_shape_lens.push_back(flatten_len);
+    if (flatten_len > num_picked_elems) {
+      num_picked_elems = flatten_len;
+      broadcast_shape = index->shape;
+    }
+  }
+
+  for (const auto& dim : broadcast_shape) {
+    oshape.push_back(dim);
+  }
+  for (size_t i = indices.size(); i < data->shape.size(); ++i) {
+    oshape.push_back(data->shape[i]);
+  }
+
+  // Do broadcast for indices
+  Array<Tensor> bindices;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    if (flatten_shape_lens[i] < num_picked_elems) {
+      bindices.push_back(broadcast_to(indices[i], broadcast_shape));
+    } else {
+      bindices.push_back(indices[i]);
+    }
+  }
+
+  return compute(
+    oshape,
+    [&](const Array<Var>& iter_var) {
+      Array<PrimExpr> tensor_indices;
+      for (size_t i = 0; i < broadcast_shape.size(); ++i) {
+        tensor_indices.push_back(iter_var[i]);
+      }
+
+      Array<PrimExpr> real_indices;
+      for (size_t i = 0; i < bindices.size(); ++i) {
+        real_indices.push_back(bindices[i](tensor_indices));
+      }
+      for (size_t i = broadcast_shape.size(); i < iter_var.size(); ++i) {
+        real_indices.push_back(iter_var[i]);
+      }
+
+      return data(real_indices);
+    },
+    name, tag);
 }
 
 }  // namespace topi

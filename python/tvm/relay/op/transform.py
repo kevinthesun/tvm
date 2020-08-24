@@ -1167,3 +1167,21 @@ def sparse_to_dense(sparse_indices, output_shape, sparse_values, default_value=0
     if default_value == 0:
         default_value = const(0)
     return _make.sparse_to_dense(sparse_indices, output_shape, sparse_values, default_value)
+
+
+def adv_index(inputs):
+    """
+    Numpy style advanced indexing. Index with a list of tensors.
+
+    Parameters
+    ----------
+    inputs : Union(List[relay.Expr], Tuple[relay.Expr])
+        Input tensor and indices.
+        The first tensor is input data and rests are indices.
+
+    Returns
+    -------
+    result: relay.Expr
+        Output tensor.
+    """
+    return _make.adv_index(Tuple(inputs))

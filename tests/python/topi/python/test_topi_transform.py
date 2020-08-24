@@ -746,6 +746,41 @@ def verify_sparse_to_dense(sparse_indices, sparse_values, default_value, output_
     for device in get_all_backend():
         check_device(device)
 
+def verify_adv_index(data_shape, index_shapes):
+    dtype = "float32"
+    data = te.placeholder(shape=data_shape, name="data", dtype=dtype)
+    indices = []
+    np_data = np.random.uniform(size=data_shape).astype(dtype)
+    np_indices = []
+    for i, index_shape in enumerate(index_shapes):
+        limit = data_shape[i]
+        np_indices.append(np.random.uniform(0, limit - 1, size=index_shape).astype("int64"))
+        indices.append(te.placeholder(shape=index_shape, name="index_{}".format(i), dtype="int64"))
+    np_out = np_data[tuple(np_indices)]
+    out = topi.adv_index(data, indices)
+
+    def check_device(device):
+        ctx = tvm.context(device, 0)
+        if not ctx.exist:
+            print("Skip because %s is not enabled" % device)
+            return
+        print("Running on target: %s" % device)
+        with tvm.target.create(device):
+            s = tvm.topi.testing.get_injective_schedule(device)(out)
+
+        func = tvm.build(s, [data] + indices + [out], device, name="adv_index")
+
+        nd_list = [tvm.nd.array(np_data, ctx)]
+        for np_index in np_indices:
+            nd_list.append(tvm.nd.array(np_index, ctx))
+        nd_list.append(tvm.nd.empty(out.shape, ctx=ctx, dtype=data.dtype))
+
+        func(*nd_list)
+        tvm.testing.assert_allclose(nd_list[-1].asnumpy(), np.array(np_out))
+
+    for device in get_all_backend():
+        check_device(device)
+
 def test_strided_slice():
     verify_strided_slice((3, 4, 3), [0, 0, 0], [4, -5, 4], [1, -1, 2])
     verify_strided_slice((3, 4, 3), [1, 1, 0], [4, 4, 3], [2, 1, 1])
@@ -1105,6 +1140,11 @@ def test_sparse_to_dense():
     #sparse_indices should not be > 2d tensor
     #verify_sparse_to_dense([[[[0, 1, 4], [0, 2, 4]]]], [[[3.1, 3.1, 3.1]]], 3.5, [5], [3.1, 3.1, 3.5, 3.5, 3.1])
 
+def test_adv_index():
+    verify_adv_index((3, 4, 5), [(2,), (2, ), (1,)])
+    verify_adv_index((10, 15, 5), [(1, 1), (2, 7)])
+    verify_adv_index((10, 5, 15), [(1, 2, 1), (1, 2, 7)])
+
 if __name__ == "__main__":
     test_strided_slice()
     test_concatenate()
@@ -1130,3 +1170,4 @@ if __name__ == "__main__":
     test_one_hot()
     test_unravel_index()
     test_sparse_to_dense()
+    test_adv_index()

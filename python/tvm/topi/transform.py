@@ -798,3 +798,21 @@ def sparse_to_dense(sparse_indices, output_shape, sparse_values, default_value=0
     """
 
     return cpp.sparse_to_dense(sparse_indices, output_shape, sparse_values, default_value)
+
+def adv_index(data, indices):
+    """Numpy style indexing with tensors.
+
+    Parameters
+    ----------
+    data : tvm.te.Tensor
+        Input data.
+
+    indices : A list of tvm.te.Tensor
+        Tensor index.
+
+    Returns
+    -------
+    result : tvm.te.Tensor
+        Output tensor
+    """
+    return cpp.adv_index(data, indices)
