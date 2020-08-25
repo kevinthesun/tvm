@@ -213,6 +213,8 @@ def lower(sch,
 
     optimize = tvm.transform.Sequential(pass_list)
     mod = optimize(mod)
+    #print(name)
+    #print(mod[name])
     return mod
 
 

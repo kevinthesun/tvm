@@ -89,6 +89,11 @@ def compute(shape, fcompute, name="compute", tag="", attrs=None):
     shape = (shape,) if isinstance(shape, tvm.tir.PrimExpr) else shape
     # for python3
     shape = tuple([int(s) if isinstance(s, float) else s for s in shape])
+    #print(name)
+    #print(tag)
+    #for dim in shape:
+    #    print(type(dim))
+    #    print(dim)
     ndim = len(shape)
     code = fcompute.__code__
 

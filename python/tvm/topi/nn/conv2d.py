@@ -431,6 +431,7 @@ def conv2d_NCHWc(data, kernel, stride, padding, dilation, layout, out_layout, ou
     # output shape
     out_height = (ih + HPAD - dilated_kernel_h) // HSTR + 1
     out_width = (iw + WPAD - dilated_kernel_w) // WSTR + 1
+
     oshape = (n, oc_chunk, out_height, out_width, oc_bn)
     pad_before = (0, 0, pad_top, pad_left, 0)
     pad_after = (0, 0, pad_down, pad_right, 0)

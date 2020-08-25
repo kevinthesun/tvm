@@ -484,6 +484,8 @@ bool IsDataDependant(const CallNode* call) {
         return false;
       }
     }
+  } else if (op->name == "dyn.reshape") {
+    return true;
   }
 
   return tshape_data_dependant[op];

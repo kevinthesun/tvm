@@ -25,6 +25,7 @@ import sys
 import numpy as np
 
 import tvm
+from tvm.topi.util import get_const_tuple
 
 from .. import analysis as _analysis
 from .. import expr as _expr
@@ -32,7 +33,7 @@ from .. import op as _op
 from ..ty import TupleType, TensorType, Any
 from ..loops import while_loop
 from .. import transform
-from .common import get_relay_op
+from .common import get_relay_op, AttrCvt
 from .common import infer_shape as _infer_shape
 from .common import infer_value as _infer_value
 from .common import infer_value_simulated as _infer_value_simulated
@@ -127,8 +128,26 @@ def _is_quantized_tensor(data, prelude):
 # operator implementation
 def _elemwise(name):
     def _impl(inputs, input_types):
-        data0, data1 = _pytorch_promote_types(inputs[:2], input_types[:2])
-        return get_relay_op(name)(data0, data1)
+        if (name == "maximum" or name == "minimum") and len(inputs) == 1:
+            ret = _op.max(inputs[0]) if name == "maximum" else _op.min(inputs[0])
+            return ret
+
+        it0, it1 = input_types[:2]
+        if isinstance(inputs[0], _expr.Expr):
+            it0 = _infer_type(inputs[0]).checked_type.dtype
+        if isinstance(inputs[1], _expr.Expr):
+            it1 = _infer_type(inputs[1]).checked_type.dtype
+
+        if it0 != it1:
+            data0, data1 = _pytorch_promote_types(inputs[:2], [it0, it1])
+        else:
+            data0, data1 = inputs[:2]
+            if np.isscalar(data0):
+                data0 = _expr.const(data0, it0)
+            if np.isscalar(data1):
+                data1 = _expr.const(data1, it1)
+        ret = get_relay_op(name)(data0, data1)
+        return ret
     return _impl
 
 
@@ -155,7 +174,11 @@ def _arange():
         def _get_value(val, dtype):
             # dtype is a tvm dtype
             if isinstance(val, _expr.Expr):
-                return _op.cast(val, dtype)
+                try:
+                    ret = _infer_value(_op.cast(val, dtype), {}).asnumpy()
+                except:
+                    return _op.cast(val, dtype)
+                return _expr.const(ret, dtype)
             return _create_typed_const(val, dtype)
 
         def _get_type(val, inp_type):
@@ -176,9 +199,14 @@ def _arange():
                 dtype = "float32"
             else:
                 dtype = "int64"
-            start = _get_value(0, dtype)
-            stop = _get_value(inputs[0], dtype)
-            step = _get_value(1, dtype)
+            if inputs[1] is not None:
+                start = _get_value(inputs[0], dtype)
+                stop = _get_value(inputs[1], dtype)
+                step = _get_value(inputs[2], dtype)
+            else:
+                start = _expr.const(0, dtype)
+                stop = _get_value(inputs[0], dtype)
+                step = _expr.const(1, dtype)
         elif len(inputs) == 7:
             types = [_get_type(inputs[i], input_types[i]) for i in range(3)]
             if inputs[3] is not None:
@@ -187,9 +215,14 @@ def _arange():
                 dtype = "float32"
             else:
                 dtype = "int64"
-            start = _get_value(inputs[0], dtype)
-            stop = _get_value(inputs[1], dtype)
-            step = _get_value(inputs[2], dtype)
+            if inputs[1] is not None:
+                start = _get_value(inputs[0], dtype)
+                stop = _get_value(inputs[1], dtype)
+                step = _get_value(inputs[2], dtype)
+            else:
+                start = _expr.const(0, dtype)
+                stop = _get_value(inputs[0], dtype)
+                step = _expr.const(1, dtype)
         else:
             msg = "Unknown number of arguments (%d) to parse." % (len(inputs))
             raise AssertionError(msg)
@@ -238,6 +271,7 @@ def _concatenate(prelude):
         data = inputs[0]
         axis = inputs[1]
 
+
         if not isinstance(data, list):
             return tensor_array_concat(data, axis)
 
@@ -250,42 +284,102 @@ def _concatenate(prelude):
 def _slice():
     def _impl(inputs, input_types):
         data = inputs[0]
-        strides = []
+        dshape = _infer_shape(data)
+        ndim = len(dshape)
+        end = []
+        slice_mode="end"
+        need_handle = True
+        for dim in dshape:
+            if isinstance(dim, tvm.tir.Any):
+                end = _op.shape_of(data)
+                break
+            else:
+                end.append(int(dim))
 
-        if isinstance(data, _expr.Expr):
-            inferred_shape = _infer_shape(data)
-            end = []
-            for infer in inferred_shape:
-                end.append(int(infer))
-            if isinstance(data, _expr.Var):
-                end = inferred_shape
-                end = list(end)
-        else:
-            end = data.shape
+        data_dim = len(dshape)
 
-        begin = [0] * len(end)
+        begin = [0] * data_dim
+        strides = [1] * data_dim
         dim = int(inputs[1])
+        stride = int(inputs[4])
         if isinstance(inputs[2], _expr.Call):
-            begin[dim] = np.asscalar(_infer_value(inputs[2], {}).asnumpy().astype(np.int))
+            try:
+                begin[dim] = np.asscalar(_infer_value(inputs[2], {}).asnumpy().astype(np.int))
+            except:
+                begin[dim] = inputs[2]
         else:
             begin[dim] = int(inputs[2])
 
-        if isinstance(inputs[3], str) and inputs[3].isdigit():
-            end[dim] = min(end[dim], int(inputs[3]))
+        if isinstance(begin[dim], int):
+            begin = _expr.const(begin)
         else:
-            if isinstance(inputs[3], _expr.Call):
-                target_end = np.asscalar(_infer_value(inputs[3], {}).asnumpy().astype(np.int))
+            tmp = []
+            for b in begin:
+                if isinstance(b, int):
+                    tmp.append(_op.expand_dims(_expr.const(b, "int64"), axis=0))
+                else:
+                    tmp.append(_op.cast(_op.expand_dims(b, axis=0), "int64"))
+            begin = _op.concatenate(tmp, axis=0)
+
+        if isinstance(inputs[3], str) and inputs[3].isdigit():
+            target_end = int(inputs[3])
+        else:
+            if isinstance(inputs[3], _expr.Expr):
+                try:
+                    target_end = np.asscalar(_infer_value(inputs[3], {}).asnumpy().astype(np.int))
+                except:
+                    target_end = inputs[3]
             else:
                 target_end = inputs[3]
 
-            end[dim] = min(end[dim], target_end)
+            if isinstance(target_end, int) and target_end > 99999999:
+                if isinstance(begin, _expr.Constant) and begin.data.asnumpy().tolist()[dim] == 0 and stride == 1:
+                    return data
+                target_end = dshape[dim]
+                if isinstance(target_end, tvm.tir.Any):
+                    need_handle = False
 
-        strides.append(int(inputs[4]))
-        return _op.transform.strided_slice(data,
-                                           begin=_expr.const(begin),
-                                           end=_expr.const(end),
+        if not isinstance(target_end, _expr.Expr):
+            if isinstance(end, list):
+                end[dim] = target_end
+                end = _expr.const(end)
+            elif need_handle:
+                all_static = True
+                for i in range(len(dshape)):
+                    if i != dim and isinstance(dshape[i], tvm.tir.Any):
+                        all_static = False
+
+                if all_static:
+                    end = list(get_const_tuple(dshape))
+                    end[dim] = target_end
+                    end = _expr.const(end)
+                else:
+                    target_end = _expr.const(target_end)
+                    end = _op.scatter(end, _op.expand_dims(_expr.const(dim), axis=0), _op.expand_dims(target_end, axis=0), axis=0)
+        else:
+            ttype = _infer_type(target_end).checked_type.dtype
+            if str(ttype) != "int32":
+                target_end = _op.cast(target_end, 'int32')
+            end = _op.shape_of(data)
+            end = _op.scatter(end, _op.expand_dims(_expr.const(dim), axis=0), _op.expand_dims(target_end, axis=0), axis=0)
+
+
+        btype = _infer_type(begin).checked_type.dtype
+        if str(btype) != "int32":
+            begin = _op.cast(begin, "int32")
+
+        etype = _infer_type(end).checked_type.dtype
+        if str(etype) != "int32":
+            end = _op.cast(end, "int32")
+
+        strides[dim] = stride
+        ret = _op.transform.strided_slice(data,
+                                           begin=begin,
+                                           end=end,
                                            strides=_expr.const(strides),
-                                           slice_mode="end")
+                                           slice_mode=slice_mode)
+
+        return ret
     return _impl
 
 def _split():
@@ -310,7 +404,15 @@ def _split_with_sizes():
 
         split_index = 0
         indices = []
-        sections = _infer_shape(inputs[1])
+
+        tmp = []
+        for s in inputs[1]:
+            if isinstance(s, _expr.Constant):
+                tmp.append(int(s.data.asnumpy()))
+            else:
+                tmp.append(s)
+
+        sections = tmp#_infer_shape(inputs[1])
         for i in range(len(sections) - 1):
             split_index += sections[i]
             indices.append(split_index)
@@ -337,7 +439,11 @@ def _take():
 def _topk():
     def _impl(inputs, input_types):
         data = inputs[0]
-        k = int(inputs[1])
+        try:
+            k = int(_infer_value(inputs[1], {}).asnumpy().tolist())
+            k = _expr.const(k)
+        except:
+            k = inputs[1]
         axis = int(inputs[2])
         is_ascend = not bool(inputs[3])
         sort = bool(inputs[4])
@@ -346,7 +452,7 @@ def _topk():
             msg = "Currently supports only sorted output for topk operator."
             raise AssertionError(msg)
 
-        outs = _op.topk(data, k=k, axis=axis, is_ascend=is_ascend, ret_type="both")
+        outs = _op.topk(data, k=k, axis=axis, is_ascend=is_ascend, ret_type="both", dtype="int64")
 
         return outs[0], outs[1]
     return _impl
@@ -406,21 +512,46 @@ def _where():
 def _ones():
     def _impl(inputs, input_types):
         data = inputs[0]
+        size = []
+        need_reshape = False
+        new_shape = []
+        for dim in data:
+            if isinstance(dim, _expr.Expr):
+                if isinstance(dim, _expr.Constant):
+                    dim = int(dim.data.asnumpy())
+                    if isinstance(size, list):
+                        size.append(int(dim))
+                    new_shape.append(int(dim))
+                    continue
+                try:
+                    dim = _infer_value(dim, {})
+                    if isinstance(size, list):
+                        size.append(int(dim))
+                    new_shape.append(int(dim))
+                except:
+                    size = None
+                    need_reshape = True
+                    new_shape.append(0)
+            else:
+                if isinstance(size, list):
+                    size.append(dim)
+                new_shape.append(int(dim))
 
-        import torch
-        if isinstance(data, _expr.Expr):
-            shape = _infer_shape(data)
-        elif isinstance(data, list):
-            shape = data
-        elif isinstance(data, (torch.Tensor, np.ndarray)):
-            shape = data.shape
+
+        if size is None:
+            tmp = []
+            for dim in data:
+                tmp.append(_op.cast(_op.expand_dims(dim, axis=0), "int64"))
+            size = _op.concatenate(tmp, axis=0)
+        if inputs[1] is None:
+            dtype = "float32"
         else:
-            msg = "Data type %s could not be parsed in ones op" % (type(data))
-            raise AssertionError(msg)
+            dtype = _convert_dtype_value(inputs[1])
+        out = _op.full(_expr.const(1), size, dtype=dtype)
+        if need_reshape:
+            out = _op.reshape(out, new_shape)
+        return out
 
-        dtype = _convert_dtype_value(inputs[1])
-
-        return _op.full(_expr.const(1), shape, dtype=dtype)
     return _impl
 
 def _ones_like():
@@ -440,21 +571,50 @@ def _ones_like():
 def _zeros():
     def _impl(inputs, input_types):
         data = inputs[0]
+        size = []
+        need_reshape = False
+        new_shape = []
+        for dim in data:
+            if isinstance(dim, _expr.Expr):
+                if isinstance(dim, _expr.Constant):
+                    dim = int(dim.data.asnumpy())
+                    if isinstance(size, list):
+                        size.append(int(dim))
+                    new_shape.append(int(dim))
+                    continue
+                try:
+                    dim = _infer_value(dim, {})
+                    if isinstance(size, list):
+                        size.append(int(dim))
+                    new_shape.append(int(dim))
+                except:
+                    size = None
+                    need_reshape = True
+                    new_shape.append(0)
+            else:
+                if isinstance(size, list):
+                    size.append(dim)
+                new_shape.append(int(dim))
 
-        import torch
-        if isinstance(data, _expr.Expr):
-            shape = _infer_shape(data)
-        elif isinstance(data, list):
-            shape = data
-        elif isinstance(data, (torch.Tensor, np.ndarray)):
-            shape = data.shape
+        if size is None:
+            tmp = []
+            for dim in data:
+                tmp.append(_op.cast(_op.expand_dims(dim, axis=0), "int64"))
+            size = _op.concatenate(tmp, axis=0)
+        if inputs[1] is None:
+            dtype = "float32"
         else:
-            msg = "Data type %s could not be parsed in zeros op" % (type(data))
-            raise AssertionError(msg)
+            dtype = _convert_dtype_value(inputs[1])
 
-        dtype = _convert_dtype_value(inputs[1])
-
-        return _op.full(_expr.const(0), shape, dtype=dtype)
+        out = _op.full(_expr.const(0), size, dtype=dtype)
+        if need_reshape:
+            all_zero = True
+            for s in new_shape:
+                if not isinstance(s, int) or s != 0:
+                    all_zero = False
+            if not all_zero:
+                out = _op.reshape(out, new_shape)
+        return out
     return _impl
 
 
@@ -492,6 +652,14 @@ def _full():
             dtype = _convert_dtype_value(inputs[2])
         else:
             dtype = data.type_annotation.dtype
+
+        tmp = []
+        for s in shape:
+            if isinstance(s, _expr.Constant):
+                tmp.append(int(s.data.asnumpy()))
+            else:
+                tmp.append(s)
+        shape = tmp
 
         return _op.full(_expr.const(fill_value), shape, dtype=dtype)
     return _impl
@@ -655,12 +823,52 @@ def _adaptive_avg_pool_3d():
 def _maxpool_2d():
     def _impl(inputs, input_types):
         data = inputs[0]
+        pool_size = inputs[1]
+        strides = inputs[2]
+        padding = inputs[3]
+        dilation = inputs[4]
 
-        pool_size = _infer_shape(inputs[1])
-        strides = _infer_shape(inputs[2])
-        padding = _infer_shape(inputs[3])
-        dilation = _infer_shape(inputs[4])
+        if isinstance(pool_size, _expr.Expr):
+            pool_size = _infer_value(inputs[1], {}).asnumpy().tolist()
+        if isinstance(strides, _expr.Expr):
+            strides = _infer_value(inputs[2], {}).asnumpy().tolist()
+        if isinstance(padding, _expr.Expr):
+            padding = _infer_value(inputs[3], {}).asnumpy().tolist()
+        if isinstance(dilation, _expr.Expr):
+            dilation = _infer_value(inputs[4], {}).asnumpy().tolist()
         ceil_mode = int(inputs[5])
+
+        tmp = []
+        for p in padding:
+            if isinstance(p, _expr.Constant):
+                tmp.append(int(p.data.asnumpy()))
+            else:
+                tmp.append(p)
+        padding = tmp
+
+        tmp = []
+        for s in strides:
+            if isinstance(s, _expr.Constant):
+                tmp.append(int(s.data.asnumpy()))
+            else:
+                tmp.append(s)
+        strides = tmp
+
+        tmp = []
+        for p in pool_size:
+            if isinstance(p, _expr.Constant):
+                tmp.append(int(p.data.asnumpy()))
+            else:
+                tmp.append(p)
+        pool_size = tmp
+
+        tmp = []
+        for p in dilation:
+            if isinstance(p, _expr.Constant):
+                tmp.append(int(p.data.asnumpy()))
+            else:
+                tmp.append(p)
+        dilation = tuple(tmp)
 
         if dilation != (1, 1):
             msg = "MaxPool2d with dilation %s is not implemented" % (str(dilation))
@@ -762,17 +970,17 @@ def _convolution():
         use_bias = isinstance(bias, _expr.Expr)
 
         if isinstance(strides, _expr.Expr):
-            strides = _infer_shape(strides)
+            strides = _infer_value(strides, {})
             if len(kernel_size) == 1:
                 strides = (1, ) + strides
 
         if isinstance(padding, _expr.Expr):
-            padding = _infer_shape(padding)
+            padding = _infer_value(padding, {})
             if len(kernel_size) == 1:
                 padding = (0, ) + padding
 
         if isinstance(dilation, _expr.Expr):
-            dilation = _infer_shape(dilation)
+            dilation = _infer_value(dilation, {})
             if len(kernel_size) == 1:
                 dilation = (1, ) + dilation
 
@@ -797,6 +1005,33 @@ def _convolution():
         if len(kernel_size) == 1:
             data = _op.expand_dims(data, axis=2)
             weight = _op.expand_dims(weight, axis=2)
+
+        if len(padding) == 2:
+            padding = [padding[0], padding[1], padding[0], padding[1]]
+
+        tmp = []
+        for p in padding:
+            if isinstance(p, _expr.Constant):
+                tmp.append(int(p.data.asnumpy()))
+            else:
+                tmp.append(p)
+        padding = tmp
+
+        tmp = []
+        for s in strides:
+            if isinstance(s, _expr.Constant):
+                tmp.append(int(s.data.asnumpy()))
+            else:
+                tmp.append(s)
+        strides = tmp
+
+        tmp = []
+        for d in dilation:
+            if isinstance(d, _expr.Constant):
+                tmp.append(int(d.data.asnumpy()))
+            else:
+                tmp.append(d)
+        dilation = tmp
 
         conv_out = conv_op(data,
                            weight,
@@ -973,6 +1208,7 @@ def _transpose(prelude):
             msg = "Data type %s could not be parsed in transpose op" % (type(data))
             raise AssertionError(msg)
 
+
         if isinstance(data, tvm.runtime.NDArray):
             ndims = len(data.shape)
         axes = list(range(ndims))
@@ -992,14 +1228,42 @@ def _transpose(prelude):
             axes[src] = dst
             axes[dst] = src
         else:
-            axes = _infer_shape(inputs[1], prelude.mod)
+            #axes = _infer_shape(inputs[1], prelude.mod)
+            tmp = []
+            for a in inputs[1]:
+                if isinstance(a, _expr.Constant):
+                    tmp.append(int(a.data.asnumpy()))
+                else:
+                    tmp.append(a)
+            axes = tmp
+
         return _op.transform.transpose(data, axes)
     return _impl
 
 def _flatten():
     def _impl(inputs, input_types):
         data = inputs[0]
-        return _op.nn.batch_flatten(data)
+        start = int(inputs[1])
+        end = int(inputs[2])
+        dshape = get_const_tuple(_infer_shape(data))
+        ndim = len(dshape)
+        if end < 0:
+            end += ndim
+        new_shape = []
+        for i in range(start):
+            new_shape.append(0)
+ 
+        new_shape.append(-1)
+        squeeze_axes = []
+        for i in range(start + 1, end + 1):
+            new_shape.append(1)
+            squeeze_axes.append(i)
+        for i in range(end + 1, ndim):
+            new_shape.append(0)
+        out = _op.reshape(data, new_shape)
+        if squeeze_axes:
+            out =  _op.squeeze(out, axis=squeeze_axes)
+        return out
     return _impl
 
 def _dense():
@@ -1028,15 +1292,15 @@ def _dense():
 
         if use_bias:
             bias = inputs[0]
-            return _op.nn.bias_add(dense_out, bias)
+            return dense_out + bias
         else:
-            return dense_out
+            return dense_out + _expr.const(inputs[0])
     return _impl
 
 
 def _size(prelude):
     def _impl_dynamic(inp, axis):
-        shape_dynamic = _op.shape_of(inp)
+        shape_dynamic = _op.shape_of(inp, dtype="int32")
         if axis is not None:
             return _op.take(shape_dynamic, _expr.const(axis), 0)
         return shape_dynamic
@@ -1052,8 +1316,8 @@ def _size(prelude):
                 return _impl_dynamic(inputs[0], axis)
 
         if axis is not None:
-            return shape[axis]
-        return shape
+            return _expr.const(shape[axis])
+        return _expr.const(shape)
     return _impl
 
 
@@ -1080,24 +1344,40 @@ def _tensortonum():
     return _impl
 
 
-def _view():
+def _view(prelude, params):
     def _impl(inputs, input_types):
         data = inputs[0]
+        shape = inputs[1]
 
-        if len(inputs) == 3:
-            shape_inp = [inputs[1], _infer_shape(inputs[2])[0]]
-        else:
-            if isinstance(inputs[1], list):
-                shape_inp = inputs[1]
+        try:
+            shape = _infer_value(shape, params, prelude.mod).asnumpy().tolist()
+        except:
+            pass
+
+        dyn_shape = False
+        tmp = []
+        for s in shape:
+            if isinstance(s, _expr.Constant):
+                tmp.append(int(s.data.asnumpy()))
+            elif isinstance(s, _expr.Expr):
+                try:
+                    dim = _infer_value(s, params, prelude.mod).asnumpy().tolist()
+                    tmp.append(dim)
+                except:
+                    dyn_shape = True
             else:
-                shape_inp = _infer_shape(inputs[1])
-        new_shape = shape_inp
-        for i, shape in enumerate(shape_inp):
-            if isinstance(shape, _expr.Expr):
-                val = _infer_value_simulated(shape, {})
-                new_shape[i] = np.asscalar(val.asnumpy())
+                tmp.append(s)
 
-        return _op.transform.reshape(data, new_shape)
+        if not dyn_shape:
+            shape = tmp
+        else:
+            tmp = []
+            for s in shape:
+                if isinstance(s, int):
+                    s = _expr.const(s)
+                tmp.append(_op.transform.expand_dims(s, axis=0))
+            shape = _op.concatenate(tmp, axis=0)
+        return _op.transform.reshape(data, newshape=shape)
     return _impl
 
 
@@ -1107,7 +1387,30 @@ def _reshape():
         if isinstance(inputs[1], list):
             new_shape = inputs[1]
         else:
-            new_shape = _infer_shape(inputs[1])
+            raise RuntimeError("Test!")
+        tmp = []
+        is_dyn = False
+        for s in new_shape:
+            if isinstance(s, _expr.Constant):
+                tmp.append(int(s.data.asnumpy()))
+            elif isinstance(s, _expr.Expr):
+                try:
+                    dim = int(_infer_value(s, {}).asnumpy())
+                    tmp.append(dim)
+                except:
+                    is_dyn = True
+                    tmp.append(s)
+            else:
+                tmp.append(s)
+        if is_dyn:
+            new_shape = _op.full(_expr.const(0), shape=(len(tmp),), dtype="int64")
+            for i, s in enumerate(tmp):
+                if not isinstance(s, _expr.Expr):
+                    s = _expr.const(s)
+                s = _op.cast(s, "int64")
+                new_shape = _op.scatter(new_shape,  _op.expand_dims(_expr.const(i), axis=0),  _op.expand_dims(s, axis=0), axis=0)
+        else:
+            new_shape = tmp
         return _op.transform.reshape(data, new_shape)
     return _impl
 
@@ -1418,8 +1721,8 @@ def _expand():
             shape = list(_infer_shape(data_in))
 
         ndims = len(shape)
-        sizes = _infer_shape(inputs[1])
-        out = inputs[0]
+        sizes = inputs[1]
+        out = data_in
 
         out_dims = len(sizes)
         if ndims < out_dims:
@@ -1427,14 +1730,11 @@ def _expand():
             out = _op.expand_dims(out, axis=0, num_newaxis=num_newaxis)
             shape = [1] * num_newaxis + shape
 
-        for i in range(ndims):
-            if sizes[i] == -1 or sizes[i] == shape[i]:
-                continue
-            data = list()
-            for temp in range(sizes[i]):
-                data.append(out)
-
-            out = _op.tensor.concatenate(data, i)
+        for i in range(out_dims):
+            if sizes[i] != -1 and shape[i] == 1:
+                if not isinstance(sizes[i], int):
+                    sizes[i] = int(_infer_value(sizes[i], {}).asnumpy())
+                out = _op.repeat(out, sizes[i], axis=i)
 
         return out
     return _impl
@@ -1482,10 +1782,18 @@ def _pad(mode):
         # group into tuple of 2 ints
         paddings = [paddings[i:i + 2] for i in range(0, len(paddings), 2)]
 
+        const_paddings = []
+        for pad in paddings:
+            const_paddings.append([])
+            for p in pad:
+                if not isinstance(p, int):
+                    p = int(_infer_value(p, {}).asnumpy())
+                const_paddings[-1].append(p)
+
         if mode == "constant":
-            return _op.nn.pad(data, paddings, pad_value=inputs[2], pad_mode=mode)
+            return _op.nn.pad(data, const_paddings, pad_value=inputs[2], pad_mode=mode)
         else:
-            return _op.nn.pad(data, paddings, pad_mode=mode)
+            return _op.nn.pad(data, const_paddings, pad_mode=mode)
 
     return _impl
 
@@ -1502,11 +1810,17 @@ def _clamp():
 def _to():
     def _impl(inputs, input_types):
         data = inputs[0]
-        if inputs[3] in ["cpu", "cuda"]:
-            return data
+        dtype = inputs[1] if inputs[1] is not None and not isinstance(inputs[1], str) else inputs[2]
+        #if inputs[3] in ["cpu", "cuda"]:
+        #    return data
         # special handling for aten::to(data, 6, _, _, _) case
         # 6 means dtype = float
         # this happens when converting upsampling with scale factor
+        cast_map = {
+            6: "float32",
+            3: "int32",
+            4: "int64",
+        }
         cast_func = {
             6: float,
             3: int,
@@ -1517,10 +1831,15 @@ def _to():
             3: lambda x: _op.cast(x, "int32"),
             4: lambda x: _op.cast(x, "int64"),
         }
-        if inputs[1] in cast_func and not isinstance(data, _expr.Expr):
-            return cast_func[inputs[1]](data)
-        elif inputs[1] in cast_func_expr and isinstance(data, _expr.Expr):
-            return cast_func_expr[inputs[1]](data)
+        if isinstance(data, _expr.Expr):
+            actual_dtype = str(_infer_type(data).checked_type.dtype)
+            if dtype in cast_map and cast_map[dtype] == actual_dtype:
+                return data
+
+        if dtype in cast_func and not isinstance(data, _expr.Expr):
+            return cast_func[dtype](data)
+        elif dtype in cast_func_expr and isinstance(data, _expr.Expr):
+            return cast_func_expr[dtype](data)
         return data
 
     return _impl
@@ -1601,11 +1920,12 @@ def _upsample3d(method):
 
 def _expand_as():
     def _impl(inputs, input_types):
-        # TODO: maybe fix this
-        # This assumes expand_as can be removed because TVM has broadcast op
-        msg = "aten::expand_as(...) found, assume it is part of broadcast op"
-        logging.warning(msg)
-        return inputs[0]
+        target = inputs[1]
+        t0 = _infer_type(inputs[0]).checked_type.dtype
+        t1 = _infer_type(inputs[1]).checked_type.dtype
+        if t0 != t1:
+            target = _op.cast(target, t0)
+        return _op.broadcast_to_like(inputs[0], target)
     return _impl
 
 
@@ -1711,6 +2031,16 @@ def _add(prelude):
 
 def _tensor_array_stack(prelude):
     def _impl(inputs, input_types):
+        data = inputs[0]
+        if not isinstance(data, list):
+            data = [data]
+        if isinstance(data, list):
+            axis = int(inputs[1])
+            exp_data = []
+            for d in data:
+                exp_data.append(_op.transform.expand_dims(d, axis))
+            return _op.concatenate(exp_data, axis)
+
         tensor_array, shape = _convert_to_tensor_array(inputs[0], prelude)
 
         stacked_shape = (Any(),) + shape
@@ -1773,6 +2103,176 @@ def _meshgrid():
     def _impl(inputs, input_types):
         data = inputs[0]
         return _op.meshgrid(data, indexing="ij")
+    return _impl
+
+def _roi_align(prelude):
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        boxes = inputs[1]
+
+        output_size = (inputs[3], inputs[4])
+        spatial_scale = inputs[2]
+
+        return _op.vision.roi_align(data, boxes, output_size, spatial_scale)
+    return _impl
+
+def _nms(prelude):
+    def _impl(inputs, input_types):
+        boxes = inputs[0]
+        scores = inputs[1]
+        iou_threshold = inputs[2]
+
+        # Generate data with shape (1, num_anchors, 5)
+        scores = AttrCvt(op_name="expand_dims",
+                         extras={'axis': -1, 'num_newaxis': 1})([scores], {})
+
+        # Prepare input data for get_valid_counts
+        data = _op.concatenate([scores, boxes], -1)
+        data = _op.expand_dims(data, 0, 1)
+        # Leverage get_valid_counts to sort the data and clear invalid boxes
+        ct, data, indices = get_relay_op('get_valid_counts')(data,
+                                                             score_threshold=-1.0,
+                                                             id_index=-1,
+                                                             score_index=0)
+
+        # Perform Non-Maximum Suppression,
+        # PyTorch NMS doesn't have parameter top_k and max_output_size
+        score_index = 0
+        top_k = max_out_size = -1
+        nms_ret = get_relay_op('non_max_suppression')(data=data,
+                                                      valid_count=ct,
+                                                      indices=indices,
+                                                      max_output_size=max_out_size,
+                                                      iou_threshold=iou_threshold,
+                                                      force_suppress=True,
+                                                      top_k=top_k,
+                                                      coord_start=1,
+                                                      score_index=score_index,
+                                                      id_index=-1,
+                                                      return_indices=True,
+                                                      invalid_to_bottom=False)
+
+        # squeeze the two outputs of nms for strided_slice
+        size = get_relay_op("squeeze")(nms_ret[1], axis=[1])
+        data_slice = get_relay_op("squeeze")(nms_ret[0], axis=[0])
+
+        # strided slice to get the dynamic result
+        return get_relay_op("strided_slice")(data_slice, begin=_expr.const([0]),
+                                             end=size, slice_mode="size")
+    return _impl
+
+def _unbind():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        dim = int(inputs[1])
+        ishapes = _infer_shape(data)
+        if dim >= len(ishapes):
+            msg = "Please check input dim, it shouldn't" \
+                  "be greater than or equal to rank."
+            raise AttributeError(msg)
+
+        selections = ishapes[dim]
+        res_split = _op.split(data, selections, dim)
+        # squeeze each split piece to get same shape as aten::unbind
+        # todo (yongwww): add new op to avoid the squeeze overhead
+        ret = []
+        for i in range(selections):
+            ret.append(_op.transform.squeeze(res_split[i], axis=[dim]))
+        ret = _expr.TupleWrapper(_expr.Tuple(ret), selections)
+        return ret
+    return _impl
+
+def _shape_as_tensor(prelude):
+    def _impl(inputs, input_types):
+        is_symbolic_shape = False
+        input_shape = _infer_shape(inputs[0], prelude.mod)
+        for axis in input_shape:
+            if not isinstance(axis, (int, tvm.tir.IntImm)):
+                is_symbolic_shape = True
+                break
+
+        if is_symbolic_shape:
+            ret = _op.shape_of(inputs[0], dtype='int64')
+        else:
+            ret = _expr.const(np.array(input_shape), dtype="int64")
+
+        return ret
+    return _impl
+
+def _logical_and():
+    def _impl(inputs, input_types):
+        lhs = _op.cast(inputs[0], "bool")
+        rhs = _op.cast(inputs[1], "bool")
+
+        return _op.logical_and(lhs, rhs)
+    return _impl
+
+def _nonzero():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        ret = _op.transform.argwhere(data)
+        if len(inputs) > 1 and inputs[1]:
+            ret = _unbind()([ret, 0], None)
+        return ret
+    return _impl
+
+def _scatter():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        axis = int(inputs[1])
+        index = inputs[2]
+        src = inputs[3]
+
+        return _op.transform.scatter(data, index, src, axis)
+    return _impl
+
+def _scalar_tensor():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        cast_map = {
+            6: "float32",
+            3: "int32",
+            4: "int64",
+        }
+        type_key = inputs[1]
+        if isinstance(data, _expr.Constant):
+            data = data.data.asnumpy().tolist()
+        return _expr.const(data, cast_map[type_key])
+    return _impl
+
+def _interpolate():
+    def _impl(inputs, input_types):
+        if isinstance(inputs[1], _expr.Expr):
+            out_size = inputs[1]
+        elif isinstance(inputs[1], list):
+            try:
+                infer_res = [_infer_value(size, {}) for size in inputs[1]]
+                out_size = [np.asscalar(res.asnumpy().astype(np.int))
+                            for res in infer_res]
+            except:
+                h = _op.expand_dims(inputs[1][0], axis=0)
+                w = _op.expand_dims(inputs[1][1], axis=0)
+                out_size = _op.concatenate([h, w], axis=0)
+
+
+        data = inputs[0]
+
+        align_corners = inputs[4]
+        method = inputs[3]
+        if method.startswith("nearest"):
+            nethod = "nearest_neighbor"
+
+        if method == "nearest_neighbor":
+            coord_trans = "asymmetric"
+        elif align_corners:
+            coord_trans = "align_corners"
+        else:
+            coord_trans = "half_pixel"
+
+        def func(x):
+            return _op.image.resize(x, out_size, "NCHW", method, coord_trans)
+
+        return func(data)
     return _impl
 
 def _pytorch_result_type(dtypes, non_tensor_inputs):
@@ -1871,6 +2371,8 @@ def _convert_data_type(input_type, default_dtype=None):
         return "qint32"
     elif input_type in ["bool", "torch.bool"]:
         return "bool"
+    elif input_type in ["str"]:
+        return "str"
     else:
         raise NotImplementedError("input_type {} is not handled yet".format(input_type))
     return "float32"  # Never reached
@@ -1905,7 +2407,7 @@ def _wrap_const(c):
     return c
 
 # Operator mappings
-def _get_convert_map(prelude):
+def _get_convert_map(prelude, params):
     convert_map = {
         "aten::device"                          : _none(),
         "prim::device"                          : _none(),
@@ -1977,7 +2479,7 @@ def _get_convert_map(prelude):
         "aten::flatten"                         : _flatten(),
         "aten::addmm"                           : _dense(),
         "aten::size"                            : _size(prelude),
-        "aten::view"                            : _view(),
+        "aten::view"                            : _view(prelude, params),
         "aten::reshape"                         : _reshape(),
         "aten::clone"                           : _clone(),
         "aten::log_softmax"                     : _log_softmax(),
@@ -2075,6 +2577,15 @@ def _get_convert_map(prelude):
         "aten::gather"                          : _gather(),
         "aten::index_select"                    : _select(),
         "aten::index"                           : _index(),
+        "torchvision::roi_align"                : _roi_align(prelude),
+        "torchvision::nms"                      : _nms(prelude),
+        "aten::unbind"                          : _unbind(),
+        "aten::__and__"                         : _logical_and(),
+        "aten::_shape_as_tensor"                : _shape_as_tensor(prelude),
+        "aten::nonzero"                         : _nonzero(),
+        "aten::scatter"                         : _scatter(),
+        "aten::scalar_tensor"                   : _scalar_tensor(),
+        "aten::__interpolate"                   : _interpolate(),
     }
     return convert_map
 
@@ -2087,7 +2598,7 @@ def _run_jit_passes(graph):
 
 def _is_int_seq(seq):
     # TODO (t-vi): handle non-int constants? (like numpy.intXX)
-    return len(seq) > 0 and all([isinstance(i, int) for i in seq])
+    return len(seq) > 0 and all([isinstance(i, (int, np.int64, np.int32)) for i in seq])
 
 
 def _get_tensor_and_var(torch_tensor, name):
@@ -2227,6 +2738,8 @@ def _get_constant(node):
             return node.s(attr_name)
         elif ty == "FunctionType":
             return None
+        elif ty == "StringType":
+            return node.s(attr_name)
         else:
             raise NotImplementedError("Unsupported type: %s" % ty)
     else:
@@ -2487,7 +3000,7 @@ def convert_loop(loop_node, outputs, convert_map, prelude):
     else:
         loop_iter_dtype = "int32"
         # always count from 0
-        init_loop_iter_val = _expr.const(0, dtype="int32")
+        init_loop_iter_val = _expr.const(0, dtype=loop_iter_dtype)
 
     body_block = list(loop_node.blocks())[0]
     block_input_names = _get_input_names(body_block)
@@ -2499,7 +3012,15 @@ def convert_loop(loop_node, outputs, convert_map, prelude):
     def get_var(name, val):
         if val:
             checked_type = _infer_type_with_prelude(val, prelude)
-            return _expr.var(name, type_annotation=checked_type)
+            shape = get_const_tuple(checked_type.shape)
+            actual_shape = []
+            for dim in shape:
+                if isinstance(dim, int) and dim == 0:
+                    actual_shape.append(Any())
+                else:
+                    actual_shape.append(dim)
+            
+            return _expr.var(name, shape=actual_shape, dtype=checked_type.dtype)
         return _expr.var(name)
 
     loop_iter_var = _expr.var(block_input_names[0], shape=(),
@@ -2551,7 +3072,7 @@ def convert_loop(loop_node, outputs, convert_map, prelude):
             # iter var increment implicit in torch, so do it manually
             # for while loop, block_outputs[0] is already a boolean,
             # the result of termination check
-            incr = _expr.const(1, dtype="int32")
+            incr = _expr.const(1, dtype=loop_iter_dtype)
             block_outputs[0] = current_vals[0] + incr
 
         return block_outputs
@@ -2570,14 +3091,16 @@ def convert_operators(operators, outputs, ret_names, convert_map, prelude, defau
     """ Convert each Torch IR operators to Relay equivalent """
     for node_name, op_node in operators:
         operator = op_node.kind()
+        #print(node_name)
+        #print(operator)
         inputs = _get_op_inputs(op_node, outputs)
 
         if operator == "prim::Constant":
             outputs[node_name] = _get_constant(op_node)
         elif operator == "prim::ListConstruct" and _is_int_seq(inputs):
-            outputs[node_name] = _expr.var(node_name, shape=inputs)
-        elif operator == "prim::ListConstruct" and _should_construct_dynamic_list(op_node):
-            outputs[node_name] = _convert_to_list_adt(inputs, prelude)
+            outputs[node_name] = [_expr.const(i) for i in inputs]#_expr.var(node_name, shape=inputs)
+        #elif operator == "prim::ListConstruct" and _should_construct_dynamic_list(op_node):
+        #    outputs[node_name] = _convert_to_list_adt(inputs, prelude)
         elif operator == "prim::ListConstruct":
             # This assumes that no more elements will be appended to this list
             # In this case, we keep the Python list
@@ -2612,6 +3135,8 @@ def convert_operators(operators, outputs, ret_names, convert_map, prelude, defau
             else:
                 assert op_node.outputsSize() == 1
                 outputs[node_name] = relay_out
+                #if isinstance(relay_out, _expr.Expr):
+                #    print(_infer_type(relay_out))
 
     return [_wrap_const(outputs[ret_name])
             for ret_name in ret_names]
@@ -2626,6 +3151,7 @@ def get_all_op_names(graph):
         for prim_node in prim_nodes:
             for block in prim_node.blocks():
                 nodes += block.nodes()
+                #print(block.nodes())
     return set(node.kind() for node in nodes)
 
 
@@ -2660,15 +3186,15 @@ def from_pytorch(script_module, input_shapes, custom_convert_map=None, default_d
     mod = tvm.IRModule()
     prelude = Prelude(mod)
 
-    convert_map = _get_convert_map(prelude)
-
     graph = script_module.graph.copy()
+    #print(graph)
     _run_jit_passes(graph)
 
     if custom_convert_map:
         convert_map.update(custom_convert_map)
 
     op_names = get_all_op_names(graph)
+    convert_map = _get_convert_map(prelude, None)
     _report_missing_conversion(op_names, convert_map)
 
     is_module = isinstance(script_module, torch.jit.ScriptModule)
@@ -2678,6 +3204,7 @@ def from_pytorch(script_module, input_shapes, custom_convert_map=None, default_d
                                     is_module=is_module)
     param_vars, tensors, packed_param_map = convert_params(graph, params)
     tvm_params = {k: tvm.nd.array(v) for k, v in tensors.items()}
+    convert_map = _get_convert_map(prelude, tvm_params)
 
     outputs.update(param_vars)
     ret_name = _get_input_names(graph.return_node())
@@ -2697,5 +3224,6 @@ def from_pytorch(script_module, input_shapes, custom_convert_map=None, default_d
                             default_dtype=default_dtype)
 
     mod["main"] = tvm.relay.Function(_analysis.free_vars(ret[0]), ret[0])
+    print(mod["main"])
 
     return transform.RemoveUnusedFunctions()(mod), tvm_params

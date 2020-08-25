@@ -52,6 +52,8 @@ def roi_align_nchw(data, rois, pooled_size, spatial_scale, sample_ratio=-1):
     dtype = rois.dtype
     _, channel, height, width = get_const_tuple(data.shape)
     num_roi, _ = get_const_tuple(rois.shape)
+    if not isinstance(num_roi, int):
+        num_roi = te.size_var("num_roi")
 
     if isinstance(pooled_size, int):
         pooled_size_h = pooled_size_w = pooled_size

@@ -150,6 +150,9 @@ def _strided_slice_shape_func_input_data(data, begin, end, strides,
                 cend = cbegin + end[i]
         else:
             cend = end[i]
+
+        if cend > data.shape[i]:
+            cend = data.shape[i]
         assert cstride != 0, "Strides can't be zero."
         out[i] = int64(ceil_div((int64(cend) - int64(cbegin)), int64(cstride)))
     return out
@@ -176,6 +179,9 @@ def _strided_slice_shape_func_input_shape(data_shape, begin, end, strides, slice
                 cend = cbegin + int64(end[i])
         else:
             cend = int64(end[i])
+
+        if end[i] > data_shape[i]:
+            cend = data_shape[i]
         assert cstride != 0, "Strides can't be zero."
         out[i] = int64(ceil_div((int64(cend) - int64(cbegin)), int64(cstride)))
     return out
@@ -673,16 +679,26 @@ def split_shape_func(attrs, inputs, _):
                               convert(axis)) for i in range(num_out)]
 
 @script
-def _adv_index_shape_func(data_shape, index_shape):
-    index_rank = index_shape.shape[0]
-    data_rank = data_shape.shape[0]
-    out = output_tensor((data_rank + index_rank - 1,), "int64")
+def _adv_index_shape_func(inputs):
+    index_rank = inputs[1].shape[0]
+    data_rank = inputs[0].shape[0]
+    out = output_tensor((data_rank + index_rank - len(inputs) + 1,), "int64")
 
+    max_flatten_len = int64(1)
     for i in const_range(index_rank):
-        out[i] = index_shape[i]
+        max_flatten_len *= inputs[1][i]
+        out[i] = inputs[1][i]
+    for i in const_range(len(inputs) - 2):
+        flatten_len = int64(1)
+        for j in const_range(index_rank):
+            flatten_len *= inputs[i + 2][j]
+        if flatten_len > max_flatten_len:
+            max_flatten_len = flatten_len
+            for k in const_range(index_rank):
+                out[k] = inputs[i + 2][k]
 
-    for i in const_range(data_rank - 1):
-        out[i + index_rank] = data_shape[i + 1]
+    for i in const_range(data_rank - len(inputs) + 1):
+        out[i + index_rank] = inputs[0][i + len(inputs) - 1]
 
     return out
 
@@ -692,4 +708,31 @@ def adv_index_shape_func(attrs, inputs, _):
     Shape func for adv_index.
     Only allow single index tensor.
     """
-    return [_adv_index_shape_func(inputs[0], inputs[1])]
+    return [_adv_index_shape_func(inputs)]
+
+@script
+def _repeat_shape_func(data_shape, repeats, axis):
+    out =  output_tensor((data_shape.shape[0],), "int64")
+
+    for i in const_range(data_shape.shape[0]):
+        if i == axis:
+            out[i] = int64(data_shape[i] * repeats)
+        else:
+            out[i] = data_shape[i]
+
+    return out
+
+@_reg.register_shape_func("repeat", False)
+def repeat_shape_func(attrs, inputs, _):
+    """
+    Shape func for repeat.
+    """
+    axis = get_const_int(attrs.axis)
+    if axis < 0:
+        axis = inputs[0].shape[0] + axis
+    return [_repeat_shape_func(inputs[0], attrs.repeats, convert(axis))]
+
+
+@_reg.register_shape_func("broadcast_to_like", False)
+def broadcast_to_like_shape_func(attrs, inputs, _):
+    return [topi.math.identity(inputs[1])]

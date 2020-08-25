@@ -78,10 +78,9 @@ inline BroadcastHelper BroadcastShape(const tvm::Array<tvm::PrimExpr>& shape1,
       bh.vars1.push_front(bh.all_vars[0]);
       bh.vars2.push_front(bh.all_vars[0]);
     } else {
-      CHECK(false) << "Incompatible broadcast dims: " << shape1[s1_size - i] << " and "
-                   << shape2[s2_size - i]
-                   << " in: " << tvm::Array<tvm::PrimExpr>(shape1.begin(), shape1.end()) << " and "
-                   << tvm::Array<tvm::PrimExpr>(shape2.begin(), shape2.end());
+      bh.common_shape.push_front(max(shape1[s1_size - i], shape2[s2_size - i]));
+      bh.vars1.push_front(bh.all_vars[0]);
+      bh.vars2.push_front(bh.all_vars[0]);
     }
   }
   // Remaining dimensions whether on shape1 or shape2 can always be completed

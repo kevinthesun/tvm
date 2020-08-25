@@ -82,25 +82,25 @@ def _scatter_3d(data, indices, updates, axis):
 @hybrid.script
 def _scatter_4d(data, indices, updates, axis):
     out = output_tensor(data.shape, data.dtype)
-    for i in const_range(data.shape[0]):
-        for j in const_range(data.shape[1]):
-            for k in const_range(data.shape[2]):
-                for l in const_range(data.shape[3]):
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            for k in range(data.shape[2]):
+                for l in range(data.shape[3]):
                     out[i, j, k, l] = data[i, j, k, l]
 
     if axis == 0:
         for i in range(indices.shape[0]):
             for j in range(indices.shape[1]):
-                for k in const_range(indices.shape[2]):
-                    for l in const_range(indices.shape[3]):
+                for k in range(indices.shape[2]):
+                    for l in range(indices.shape[3]):
                         out[indices[i, j, k, l] if indices[i, j, k, l] >=
                             0 else indices[i, j, k, l] + data.shape[axis],
                             j, k, l] = updates[i, j, k, l]
     elif axis == 1:
         for i in range(indices.shape[0]):
             for j in range(indices.shape[1]):
-                for k in const_range(indices.shape[2]):
-                    for l in const_range(indices.shape[3]):
+                for k in range(indices.shape[2]):
+                    for l in range(indices.shape[3]):
                         out[i,
                             indices[i, j, k, l] if indices[i, j, k, l] >=
                             0 else indices[i, j, k, l] + data.shape[axis],
@@ -108,8 +108,8 @@ def _scatter_4d(data, indices, updates, axis):
     elif axis == 2:
         for i in range(indices.shape[0]):
             for j in range(indices.shape[1]):
-                for k in const_range(indices.shape[2]):
-                    for l in const_range(indices.shape[3]):
+                for k in range(indices.shape[2]):
+                    for l in range(indices.shape[3]):
                         out[i, j,
                             indices[i, j, k, l] if indices[i, j, k, l] >=
                             0 else indices[i, j, k, l] + data.shape[axis],
@@ -117,8 +117,8 @@ def _scatter_4d(data, indices, updates, axis):
     else:
         for i in range(indices.shape[0]):
             for j in range(indices.shape[1]):
-                for k in const_range(indices.shape[2]):
-                    for l in const_range(indices.shape[3]):
+                for k in range(indices.shape[2]):
+                    for l in range(indices.shape[3]):
                         out[i, j, k,
                             indices[i, j, k, l] if indices[i, j, k, l] >=
                             0 else indices[i, j, k, l] + data.shape[axis]

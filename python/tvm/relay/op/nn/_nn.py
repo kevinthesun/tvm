@@ -801,6 +801,40 @@ def dilate_shape_func(attrs, inputs, _):
     """
     return [_dilate_shape_func(inputs[0], convert(attrs.strides))]
 
+@script
+def _conv2d_transpose_nchw_shape_func(dshape, kshape, strides, padding, dilation, output_padding):
+    out = output_tensor((dshape.shape[0],), "int64")
+    height = dshape[2]
+    width = dshape[3]
+    ic = dshape[1]
+    kheight = kshape[2]
+    kwidth = kshape[3]
+    dilated_kh = (kheight - 1) * dilation[0] + 1
+    dilated_kw = (kwidth - 1) * dilation[1] + 1
+
+    out_height = strides[0] * (dshape[2] - 1) + dilated_kh - padding[0] + output_padding[0]
+    out_width = strides[1] * (dshape[3] - 1) + dilated_kw - padding[1] + output_padding[1]
+
+    out[0] = dshape[0]
+    out[1] = kshape[1]
+    out[2] = out_height
+    out[3] = out_width
+    return out
+
+@reg.register_shape_func("nn.conv2d_transpose", False)
+def conv2d_transpose_nchw_shape_func(attrs, inputs, _):
+    """
+    Shape function for conv2d_transpose op.
+    """
+    strides = get_const_tuple(attrs.strides)
+    padding = get_const_tuple(attrs.padding)
+    dilation = get_const_tuple(attrs.dilation)
+    output_padding = get_const_tuple(attrs.output_padding)
+
+    return [_conv2d_transpose_nchw_shape_func(inputs[0], inputs[1],
+                                              convert(strides), convert(padding),
+                                              convert(dilation), convert(output_padding))]
+
 reg.register_shape_func("nn.bias_add", False, elemwise_shape_func)
 reg.register_shape_func("nn.softmax", False, elemwise_shape_func)
 reg.register_shape_func("nn.relu", False, elemwise_shape_func)

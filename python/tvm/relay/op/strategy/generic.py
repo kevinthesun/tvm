@@ -777,10 +777,11 @@ def wrap_compute_roi_align(topi_compute):
     def _compute_roi_align(attrs, inputs, out_type):
         assert attrs.layout == "NCHW"
         pooled_size = get_const_tuple(attrs.pooled_size)
-        return [topi_compute(inputs[0], inputs[1],
+        ret = [topi_compute(inputs[0], inputs[1],
                              pooled_size=pooled_size,
                              spatial_scale=attrs.spatial_scale,
                              sample_ratio=attrs.sample_ratio)]
+        return ret
     return _compute_roi_align
 
 @override_native_generic_func("roi_align_strategy")

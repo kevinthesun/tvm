@@ -133,6 +133,9 @@ def _pack_data(cfg, data, kernel):
     ic_chunk = ic // ic_bn
     oc_chunk = oc // oc_bn
 
+    if isinstance(n, tvm.tir.Any):
+        n = tvm.te.size_var("n")
+
     data = te.compute((n, ic_chunk, ih, iw, ic_bn),
                       lambda bs, c, h, w, vc: data[bs, c*ic_bn + vc, h, w],
                       name="data_vec")
@@ -159,6 +162,9 @@ def conv2d_NCHWc(cfg, data, kernel, strides, padding, dilation, layout, out_layo
     else:
         n, in_channel, ih, iw = get_const_tuple(data.shape)
         num_filter, _, kernel_height, kernel_width = get_const_tuple(kernel.shape)
+
+    #if not isinstance(n, int):
+    #    n = te.size_var('n')
 
     # Define autotvm tuning space
     is_kernel_1x1 = kernel_height == 1 and kernel_width == 1

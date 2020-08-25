@@ -19,6 +19,7 @@
 
 from tvm.te.hybrid import script
 from tvm import topi
+from tvm.runtime import convert
 
 from .op import register_compute, register_shape_func
 from .op import register_broadcast_schedule, register_injective_schedule
@@ -148,11 +149,21 @@ def _full_shape_func(shape):
         out[i] = int64(shape[i])
     return out
 
+@script
+def _convert_shape(shape):
+    out = output_tensor((len(shape),), "int64")
+    for i in const_range(len(shape)):
+        out[i] = int64(shape[i])
+    return out
+
 def full_shape_func(attrs, inputs, out_ndims):
     """
     Shape func for full.
     """
-    return [_full_shape_func(inputs[1])]
+    if len(inputs) > 1:
+        return [_full_shape_func(inputs[1])]
+    else:
+        return [_convert_shape(convert(attrs.shape))]
 
 def no_data_full_shape_func(attrs, inputs, out_ndims):
     """
@@ -201,9 +212,9 @@ def elemwise_shape_func(attrs, inputs, _):
     return [topi.math.identity(inputs[0])]
 
 register_shape_func("cast", False, elemwise_shape_func)
-register_shape_func("zeros", False, full_shape_func)
+register_shape_func("zeros", False, no_data_full_shape_func)
 register_shape_func("zeros_like", False, elemwise_shape_func)
-register_shape_func("ones", False, full_shape_func)
+register_shape_func("ones", False, no_data_full_shape_func)
 register_shape_func("ones_like", False, elemwise_shape_func)
 register_shape_func("full", False, full_shape_func)
 register_shape_func("full_like", False, elemwise_shape_func)
@@ -241,3 +252,6 @@ register_shape_func("fast_tanh", False, elemwise_shape_func)
 register_shape_func("fast_erf", False, elemwise_shape_func)
 register_shape_func("floor", False, elemwise_shape_func)
 register_shape_func("log", False, elemwise_shape_func)
+register_shape_func("clip", False, elemwise_shape_func)
+register_shape_func("log2", False, elemwise_shape_func)
+register_shape_func("sigmoid", False, elemwise_shape_func)
