@@ -47,9 +47,6 @@ def schedule_injective_from_existing(sch, out):
     if len(sch[out].op.axis) >= 1:
         l = sch[out].op.axis[-1]
         factor = 16
-        extent = out.shape[len(out.shape) - 1]
-        if not isinstance(extent, tir.IntImm):
-            factor = 4
         _, li = sch[out].split(l, factor=factor)
         sch[out].vectorize(li)
     return sch
