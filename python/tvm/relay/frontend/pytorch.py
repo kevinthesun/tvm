@@ -185,7 +185,7 @@ def _arange():
             # dtype is a tvm dtype
             if isinstance(val, _expr.Expr):
                 try:
-                    ret = _infer_value(val, {}).asnumpy()
+                    ret = _infer_value(_op.cast(val, dtype), {}).asnumpy()
                     ret = _expr.const(ret, dtype)
                 except Exception:
                     ret = _op.cast(val, dtype)
@@ -211,9 +211,10 @@ def _arange():
                 dtype = "float32"
             else:
                 dtype = "int64"
-            start = _get_value(0, dtype)
+
+            start = _expr.const(0, dtype)
             stop = _get_value(inputs[0], dtype)
-            step = _get_value(1, dtype)
+            step = _expr.const(1, dtype)
         elif len(inputs) == 7:
             types = [_get_type(inputs[i], input_types[i]) for i in range(3)]
             if inputs[3] is not None:
@@ -360,7 +361,7 @@ def _slice():
                     end = _op.scatter(end, _op.expand_dims(_expr.const(dim), axis=0),
                                       _op.expand_dims(target_end, axis=0), axis=0)
         else:
-            end = _op.shape_of(data)
+            end = _op.cast(_op.shape_of(data), axis_dtype)
             if not isinstance(target_end, tvm.tir.Any):
                 ttype = _infer_type(target_end).checked_type.dtype
                 if str(ttype) != axis_dtype:
@@ -3229,6 +3230,7 @@ def from_pytorch(script_module, input_shapes, custom_convert_map=None, default_d
 
     graph = script_module.graph.copy()
     _run_jit_passes(graph)
+    print(graph)
 
     if custom_convert_map:
         convert_map.update(custom_convert_map)
@@ -3265,5 +3267,6 @@ def from_pytorch(script_module, input_shapes, custom_convert_map=None, default_d
     )
 
     mod["main"] = tvm.relay.Function(_analysis.free_vars(ret[0]), ret[0])
+    print(mod["main"])
 
     return transform.RemoveUnusedFunctions()(mod), tvm_params
