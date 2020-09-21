@@ -268,6 +268,7 @@ void CodeGenLLVM::Optimize() {
 
   // place optimization pass
   llvm::PassManagerBuilder builder;
+  builder.DisableUnrollLoops = true;
   builder.OptLevel = 3;
 
 #if TVM_LLVM_VERSION >= 50
@@ -275,7 +276,7 @@ void CodeGenLLVM::Optimize() {
 #else
   builder.Inliner = llvm::createFunctionInliningPass(builder.OptLevel, 0);
 #endif
-  builder.LoopVectorize = true;
+  builder.LoopVectorize = false;
   builder.SLPVectorize = true;
   this->InitPassManagerBuilder(&builder);
 
