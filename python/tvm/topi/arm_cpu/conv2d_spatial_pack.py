@@ -228,7 +228,8 @@ def schedule_conv2d_spatial_pack_nchw(cfg, s, data_vec, kernel_vec, conv, output
     s[conv].compute_at(s[last], ow)
 
     # mark parallel
-    s[last].parallel(co)
+    parallel_axis = s[last].fuse(n, co)
+    s[last].parallel(parallel_axis)
 
     if data_vec.op.name == "data_vec_undilated":
         _, h, _, _, _, _, _, _ = s[data_vec].op.axis
