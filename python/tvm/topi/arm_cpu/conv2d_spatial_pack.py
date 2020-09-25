@@ -232,10 +232,11 @@ def schedule_conv2d_spatial_pack_nchw(cfg, s, data_vec, kernel_vec, conv, output
     s[last].parallel(parallel_axis)
 
     if data_vec.op.name == "data_vec_undilated":
-        _, h, _, _, _, _, _, _ = s[data_vec].op.axis
+        n, h, w, _, _, _, _, _ = s[data_vec].op.axis
     else:
-        _, h, _, _, _, _ = s[data_vec].op.axis
-    s[data_vec].parallel(h)
+        n, h, w, _, _, _ = s[data_vec].op.axis
+    parallel_axis = s[data_vec].fuse(n, h, w)
+    s[data_vec].parallel(parallel_axis)
 
     if kernel_vec.op.name == "kernel_vec":
         if not autotvm.GLOBAL_SCOPE.in_tuning:
