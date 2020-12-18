@@ -138,8 +138,10 @@ def extract_from_multiple_program(mods, params, target, target_host=None, ops=No
             relay.backend.compile_engine.get().clear()
             # wrap build call in thread to avoid multiprocessing problems
             build_thread = threading.Thread(target=_lower, args=(mod, target, param))
+            old_stack_size = threading.stack_size(1024 * 1024 * 1024)
             build_thread.start()
             build_thread.join()
+            threading.stack_size(old_stack_size)
             relay.backend.compile_engine.get().clear()
             # Clear the warning message cache in FallbackContext
             if isinstance(DispatchContext.current, FallbackContext):
