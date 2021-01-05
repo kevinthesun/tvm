@@ -152,15 +152,22 @@ def run_tvm_graph(
         with tvm.transform.PassContext(opt_level=opt_level, disabled_pass=disabled_pass):
             print(mod["main"])
             mod = relay.transform.InferType()(mod)
-            vm_exec = relay.vm.compile(mod, target="llvm", params=params)
+            vm_exec = relay.vm.compile(mod, target=target, params=params)
         if serialize:
             code, lib = vm_exec.save()
             vm_exec = tvm.runtime.vm.Executable.load_exec(code, lib)
-        vm = VirtualMachine(vm_exec, tvm.cpu())
+        vm = VirtualMachine(vm_exec, ctx)
         inputs = {}
         for e, i in zip(input_node, input_data):
             inputs[e] = tvm.nd.array(i)
-        result = vm.invoke("main", **inputs)
+        vm.set_input("main", **inputs)
+        result = vm.run()
+
+        warm = vm.module.time_evaluator("invoke", ctx, number=1, repeat=50)
+        prof_res = np.array(warm("main").results) * 1000
+        print("Mean vm inference time (std dev): %.2f ms (%.2f ms)"
+           % (np.mean(prof_res), np.std(prof_res)))
+
         return vmobj_to_list(result)
     else:
         with tvm.transform.PassContext(opt_level=opt_level, disabled_pass=disabled_pass):
@@ -233,7 +240,7 @@ def compare_tf_with_tvm(
 
         tf_output = run_tf_graph(sess, in_data, in_name, out_name)
 
-        for device in ["llvm", "cuda"]:
+        for device in ["cuda"]:
             ctx = tvm.context(device, 0)
             if not tvm.testing.device_enabled(device):
                 print("Skip because %s is not enabled" % device)
@@ -4682,4 +4689,25 @@ def test_forward_dynmaic_rnn_lstmblockcell():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    boxes = np.load("boxes.npy")
+    scores = np.load("score.npy")
+    max_output_size = np.int32(100)
+    dtype = "float32"
+    tf.reset_default_graph()
+    in_data_1 = tf.placeholder(dtype, boxes.shape, name="in_data_1")
+    in_data_2 = tf.placeholder(dtype, scores.shape, name="in_data_2")
+    in_data_3 = tf.placeholder(tf.int32, name="in_data_3")
+    tf.image.non_max_suppression(
+        boxes=in_data_1,
+        scores=in_data_2,
+        max_output_size=in_data_3,
+        iou_threshold=0.7,
+        score_threshold=-1.0,
+        name="nms",
+    )
+    compare_tf_with_tvm(
+        [boxes, scores, max_output_size],
+        ["in_data_1:0", "in_data_2:0", "in_data_3:0"],
+        "nms/NonMaxSuppressionV3:0",
+        mode="vm",
+    )
