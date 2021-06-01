@@ -448,3 +448,6 @@ def get_calibration_data(mod, data):
         calib_data[gvar] = value
 
     return calib_data
+
+def op_intensity(expr):
+    return _ffi_api.OpIntensity(expr)
